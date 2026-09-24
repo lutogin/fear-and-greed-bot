@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeServices stands in for capi.coinglass.com (serving an unencrypted
@@ -20,9 +21,10 @@ type fakeServices struct {
 	coinglass *httptest.Server
 	telegram  *httptest.Server
 
-	mu       sync.Mutex
-	index    string
-	messages []string
+	mu           sync.Mutex
+	index        string
+	messages     []string
+	telegramDown int // the next requests to fail with HTTP 500
 }
 
 func newFakeServices(t *testing.T, index string) *fakeServices {
@@ -43,8 +45,14 @@ func newFakeServices(t *testing.T, index string) *fakeServices {
 			return
 		}
 		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.telegramDown > 0 {
+			f.telegramDown--
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":500,"description":"Internal Server Error"}`)
+			return
+		}
 		f.messages = append(f.messages, req.Text)
-		f.mu.Unlock()
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
 	t.Cleanup(f.coinglass.Close)
@@ -56,6 +64,28 @@ func (f *fakeServices) sent() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.messages...)
+}
+
+func (f *fakeServices) failTelegram(requests int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.telegramDown = requests
+}
+
+// waitForMessages waits until at least n messages have been delivered.
+func (f *fakeServices) waitForMessages(t *testing.T, n int) []string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		sent := f.sent()
+		if len(sent) >= n {
+			return sent
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivered %d messages, want %d: %q", len(sent), n, sent)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func (f *fakeServices) options(configPath string) options {
@@ -86,8 +116,52 @@ telegram:
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// startDaemon runs the bot the long-running way (without -once) until the test ends.
+func startDaemon(t *testing.T, opts options) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, quietLogger(), opts) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("the bot did not stop")
+		}
+	})
+}
+
+func TestDaemonAnnouncesStartBeforeFirstCheck(t *testing.T) {
+	services := newFakeServices(t, "15")
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
+
+	sent := services.waitForMessages(t, 2)
+	for _, want := range []string{"бот запущен", "страх: ≤ 20", "жадность: ≥ 80", "с интервалом 4 часа", "уведомлениями: 2 дня"} {
+		if !strings.Contains(sent[0], want) {
+			t.Errorf("startup message %q does not contain %q", sent[0], want)
+		}
+	}
+	if !strings.Contains(sent[1], "Fear &amp; Greed Index: 15") {
+		t.Errorf("the alert must follow the startup message, got %q", sent[1])
+	}
+}
+
+func TestDaemonRunsWhenStartupMessageFails(t *testing.T) {
+	services := newFakeServices(t, "15")
+	services.failTelegram(1) // only the startup message is lost
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
+
+	sent := services.waitForMessages(t, 1)
+	if !strings.Contains(sent[0], "Fear &amp; Greed Index: 15") {
+		t.Errorf("the first check must still send the alert, got %q", sent[0])
+	}
+}
+
 // Runs the bot like a cron job would: every run is a new process, so the
-// cooldown must come from the state file.
+// cooldown must come from the state file. -once sends no startup message.
 func TestOnceRunsShareCooldownThroughStateFile(t *testing.T) {
 	services := newFakeServices(t, "15")
 	statePath := filepath.Join(t.TempDir(), "state", "state.json")

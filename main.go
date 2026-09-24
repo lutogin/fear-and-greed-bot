@@ -82,13 +82,19 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		Interval: cfg.Interval.Std(),
 		Logger:   log,
 	})
-	if opts.once {
+	if opts.once { // no startup message: under cron it would come with every run
 		return b.Check(ctx)
 	}
 
 	log.Info("bot started",
 		"interval", cfg.Interval, "fear_levels", cfg.Alerts.Fear, "greed_levels", cfg.Alerts.Greed,
 		"cooldown", cfg.Dedup.Cooldown, "storage", cfg.Dedup.Storage)
+	// The announcement is informational: if Telegram is unavailable right now,
+	// the bot still runs and alerts are retried on their own.
+	startMsg := bot.StartMessage(cfg.Rules(), cfg.Interval.Std(), cfg.Dedup.Cooldown.Std())
+	if err := notifier.Send(ctx, startMsg); err != nil {
+		log.Warn("startup notification not sent", "err", err)
+	}
 	b.Run(ctx)
 	log.Info("bot stopped")
 	return nil
