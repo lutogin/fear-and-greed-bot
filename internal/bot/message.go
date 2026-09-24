@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"fear-and-greed-bot/internal/alert"
 	"fear-and-greed-bot/internal/coinglass"
@@ -21,24 +22,45 @@ func Message(r fng.Reading, a alert.Alert) string {
 		icon, what = "🤑", "жадности"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s <b>Fear &amp; Greed Index: %s</b> (%s)\n", icon, number(r.Value), html.EscapeString(string(fng.Classify(r.Value))))
+	fmt.Fprintf(&b, "%s <b>Fear &amp; Greed Index: %s</b> (%s)\n", icon, number(r.Value), zone(r.Value))
 	fmt.Fprintf(&b, "Достигнут ключевой уровень %s: %s %s\n", what, sign(a.Side), number(a.Level))
-	writeDetails(&b, r)
+	writeReading(&b, r)
+	b.WriteString(coinglass.PageURL)
 	return b.String()
 }
 
-// StartMessage announces that the bot is running, with its levels and schedule.
-func StartMessage(rules alert.Rules, interval, cooldown time.Duration) string {
+// StartInfo is what the startup message reports.
+type StartInfo struct {
+	Reading   fng.Reading // the current index value, valid when FetchErr is nil
+	FetchErr  error       // why the current value could not be read
+	Rules     alert.Rules
+	Interval  time.Duration
+	Cooldown  time.Duration
+	NextCheck time.Time
+}
+
+// StartMessage announces that the bot is running: the current index value,
+// which also shows that coinglass.com is still read correctly, the key levels
+// and the schedule.
+func StartMessage(s StartInfo) string {
 	pause := "нет"
-	if cooldown > 0 {
-		pause = humanDuration(cooldown)
+	if s.Cooldown > 0 {
+		pause = humanDuration(s.Cooldown)
 	}
 	var b strings.Builder
 	b.WriteString("🚀 <b>Fear &amp; Greed бот запущен</b>\n\n")
+	if s.FetchErr != nil {
+		fmt.Fprintf(&b, "⚠️ Не удалось получить индекс: %s\n\n", html.EscapeString(truncate(s.FetchErr.Error(), 300)))
+	} else {
+		fmt.Fprintf(&b, "Индекс сейчас: <b>%s</b> (%s)\n", number(s.Reading.Value), zone(s.Reading.Value))
+		writeReading(&b, s.Reading)
+		b.WriteString("\n")
+	}
 	b.WriteString("Пороги:\n")
-	fmt.Fprintf(&b, "😱 страх: %s\n", levels(alert.SideFear, rules.Fear))
-	fmt.Fprintf(&b, "🤑 жадность: %s\n\n", levels(alert.SideGreed, rules.Greed))
-	fmt.Fprintf(&b, "Проверка индекса: сразу после запуска, затем с интервалом %s\n", humanDuration(interval))
+	fmt.Fprintf(&b, "😱 страх: %s\n", levels(alert.SideFear, s.Rules.Fear))
+	fmt.Fprintf(&b, "🤑 жадность: %s\n\n", levels(alert.SideGreed, s.Rules.Greed))
+	fmt.Fprintf(&b, "Проверка индекса: с интервалом %s, следующая %s UTC\n",
+		humanDuration(s.Interval), s.NextCheck.UTC().Format(timeLayout))
 	fmt.Fprintf(&b, "Пауза между повторными уведомлениями: %s\n", pause)
 	b.WriteString(coinglass.PageURL)
 	return b.String()
@@ -47,19 +69,34 @@ func StartMessage(rules alert.Rules, interval, cooldown time.Duration) string {
 // TestMessage is sent by the -test-message flag to check the setup.
 func TestMessage(r fng.Reading) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "✅ Бот подключён. <b>Fear &amp; Greed Index: %s</b> (%s)\n", number(r.Value), html.EscapeString(string(fng.Classify(r.Value))))
-	writeDetails(&b, r)
+	fmt.Fprintf(&b, "✅ Бот подключён. <b>Fear &amp; Greed Index: %s</b> (%s)\n", number(r.Value), zone(r.Value))
+	writeReading(&b, r)
+	b.WriteString(coinglass.PageURL)
 	return b.String()
 }
 
-func writeDetails(b *strings.Builder, r fng.Reading) {
+const timeLayout = "02.01.2006 15:04"
+
+// writeReading adds the BTC price and the time of the value, when known.
+func writeReading(b *strings.Builder, r fng.Reading) {
 	if r.Price > 0 {
 		fmt.Fprintf(b, "BTC: %s\n", usd(r.Price))
 	}
 	if !r.Time.IsZero() {
-		fmt.Fprintf(b, "Данные на %s UTC\n", r.Time.UTC().Format("02.01.2006 15:04"))
+		fmt.Fprintf(b, "Данные на %s UTC\n", r.Time.UTC().Format(timeLayout))
 	}
-	b.WriteString(coinglass.PageURL)
+}
+
+func zone(v float64) string {
+	return html.EscapeString(string(fng.Classify(v)))
+}
+
+// truncate keeps at most n runes of s.
+func truncate(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "…"
 }
 
 // sign shows how the index is compared with a level of the side.

@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -49,13 +50,24 @@ func TestTestMessage(t *testing.T) {
 	}
 }
 
+var startInfo = StartInfo{
+	Reading:   fng.Reading{Value: 72, Time: time.Date(2026, 9, 24, 0, 20, 1, 0, time.UTC), Price: 84400.7},
+	Rules:     alert.Rules{Fear: []float64{20}, Greed: []float64{80}},
+	Interval:  4 * time.Hour,
+	Cooldown:  48 * time.Hour,
+	NextCheck: time.Date(2026, 9, 25, 14, 30, 0, 0, time.FixedZone("CEST", 2*60*60)),
+}
+
 func TestStartMessage(t *testing.T) {
-	msg := StartMessage(alert.Rules{Fear: []float64{20}, Greed: []float64{80}}, 4*time.Hour, 48*time.Hour)
+	msg := StartMessage(startInfo)
 	want := "🚀 <b>Fear &amp; Greed бот запущен</b>\n\n" +
+		"Индекс сейчас: <b>72</b> (Greed)\n" +
+		"BTC: $84,401\n" +
+		"Данные на 24.09.2026 00:20 UTC\n\n" +
 		"Пороги:\n" +
 		"😱 страх: ≤ 20\n" +
 		"🤑 жадность: ≥ 80\n\n" +
-		"Проверка индекса: сразу после запуска, затем с интервалом 4 часа\n" +
+		"Проверка индекса: с интервалом 4 часа, следующая 25.09.2026 12:30 UTC\n" +
 		"Пауза между повторными уведомлениями: 2 дня\n" +
 		coinglass.PageURL
 	if msg != want {
@@ -63,9 +75,30 @@ func TestStartMessage(t *testing.T) {
 	}
 }
 
+func TestStartMessageFetchError(t *testing.T) {
+	info := startInfo
+	info.Reading = fng.Reading{}
+	info.FetchErr = errors.New(`unsupported encryption version v="88" <b>` + strings.Repeat("x", 400))
+	msg := StartMessage(info)
+	if !strings.Contains(msg, `⚠️ Не удалось получить индекс: unsupported encryption version v=&#34;88&#34; &lt;b&gt;xxx`) {
+		t.Errorf("message %q must show the escaped error", msg)
+	}
+	if strings.Contains(msg, strings.Repeat("x", 300)) || !strings.Contains(msg, "x…") {
+		t.Errorf("a long error must be truncated: %q", msg)
+	}
+	for _, unwanted := range []string{"Индекс сейчас", "BTC:"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("message %q must not contain %q", msg, unwanted)
+		}
+	}
+	if !strings.Contains(msg, "страх: ≤ 20") || !strings.Contains(msg, "следующая 25.09.2026 12:30 UTC") {
+		t.Errorf("levels and schedule must still be reported: %q", msg)
+	}
+}
+
 func TestStartMessageLevels(t *testing.T) {
 	fear, greed := []float64{10, 25}, []float64{90, 75}
-	msg := StartMessage(alert.Rules{Fear: fear, Greed: greed}, 90*time.Minute, 0)
+	msg := StartMessage(StartInfo{Rules: alert.Rules{Fear: fear, Greed: greed}, Interval: 90 * time.Minute})
 	for _, want := range []string{
 		"страх: ≤ 25, ≤ 10", // from the first reached level to the deepest
 		"жадность: ≥ 75, ≥ 90",
@@ -80,7 +113,7 @@ func TestStartMessageLevels(t *testing.T) {
 		t.Errorf("configured levels were reordered: %v %v", fear, greed)
 	}
 
-	msg = StartMessage(alert.Rules{Greed: []float64{80}}, time.Hour, time.Hour)
+	msg = StartMessage(StartInfo{Rules: alert.Rules{Greed: []float64{80}}, Interval: time.Hour, Cooldown: time.Hour})
 	if !strings.Contains(msg, "страх: не отслеживается") {
 		t.Errorf("message %q must say that fear is not tracked", msg)
 	}

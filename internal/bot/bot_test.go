@@ -269,10 +269,84 @@ func TestRunRetriesFailedCheckSooner(t *testing.T) {
 	defer cancel()
 	go b.Run(ctx)
 
-	waitFor(t, func() bool { return len(notifier.messages()) == 1 })
+	waitFor(t, func() bool { return len(notifier.messages()) == 2 }) // startup + alert after the retry
 	if got := source.callCount(); got != 2 {
 		t.Errorf("source called %d times, want 2 (failure + retry)", got)
 	}
+}
+
+// runUntilMessages runs the bot until it has sent n messages.
+func (e *env) runUntilMessages(t *testing.T, n int) []string {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.bot.Run(ctx)
+		close(done)
+	}()
+	waitFor(t, func() bool { return len(e.notifier.messages()) >= n })
+	cancel()
+	<-done
+	return e.notifier.messages()
+}
+
+func TestRunAnnouncesStartWithCurrentValue(t *testing.T) {
+	e := newEnv(defaultRules, 50)
+	msgs := e.runUntilMessages(t, 1)
+	if len(msgs) != 1 {
+		t.Fatalf("sent %q, want only the startup message", msgs)
+	}
+	for _, want := range []string{
+		"бот запущен",
+		"Индекс сейчас: <b>50</b> (Neutral)",
+		"Данные на 24.09.2026 00:20 UTC",
+		"страх: ≤ 25",
+		"жадность: ≥ 75",
+		"с интервалом 4 часа, следующая 24.09.2026 12:00 UTC", // the clock is at 08:00
+		"уведомлениями: 2 дня",
+	} {
+		if !strings.Contains(msgs[0], want) {
+			t.Errorf("startup message %q does not contain %q", msgs[0], want)
+		}
+	}
+}
+
+func TestRunAnnouncesStartBeforeAlert(t *testing.T) {
+	e := newEnv(defaultRules, 18)
+	msgs := e.runUntilMessages(t, 2)
+	if !strings.Contains(msgs[0], "Индекс сейчас: <b>18</b>") || !strings.Contains(msgs[1], "Fear &amp; Greed Index: 18") {
+		t.Fatalf("want the startup message and then the alert, got %q", msgs)
+	}
+	if got := e.source.callCount(); got != 1 {
+		t.Errorf("source called %d times, want 1: the startup message reuses the first check", got)
+	}
+}
+
+func TestRunAnnouncesFetchError(t *testing.T) {
+	e := newEnv(defaultRules, 18)
+	e.source.errs = []error{errors.New(`unsupported encryption version v="88"`)}
+	msgs := e.runUntilMessages(t, 1)
+	for _, want := range []string{
+		"Не удалось получить индекс: unsupported encryption version",
+		"следующая 24.09.2026 08:05 UTC", // retried after the default 5 minutes
+	} {
+		if !strings.Contains(msgs[0], want) {
+			t.Errorf("startup message %q does not contain %q", msgs[0], want)
+		}
+	}
+}
+
+func TestRunKeepsCheckingWhenStartupMessageFails(t *testing.T) {
+	source := &fakeSource{values: []float64{50}}
+	notifier := &fakeNotifier{err: errors.New("telegram is down")}
+	b := New(source, notifier, defaultRules, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
+		Interval: 10 * time.Millisecond,
+		Logger:   quietLogger(),
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go b.Run(ctx)
+	waitFor(t, func() bool { return source.callCount() >= 3 })
 }
 
 func TestNewAppliesDefaults(t *testing.T) {

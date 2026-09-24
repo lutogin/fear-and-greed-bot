@@ -18,6 +18,9 @@ func New(store Store, cooldown time.Duration) *Deduplicator {
 	return &Deduplicator{store: store, cooldown: cooldown}
 }
 
+// Cooldown is the minimum time between notifications about the same side.
+func (d *Deduplicator) Cooldown() time.Duration { return d.cooldown }
+
 // Allow reports whether a notification for a may be sent at now, and returns the
 // previous record of the same side, if any. The notification is suppressed when
 // the side was notified less than cooldown ago at the same or a more extreme level;

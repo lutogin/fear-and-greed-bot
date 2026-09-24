@@ -89,13 +89,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	log.Info("bot started",
 		"interval", cfg.Interval, "fear_levels", cfg.Alerts.Fear, "greed_levels", cfg.Alerts.Greed,
 		"cooldown", cfg.Dedup.Cooldown, "storage", cfg.Dedup.Storage)
-	// The announcement is informational: if Telegram is unavailable right now,
-	// the bot still runs and alerts are retried on their own.
-	startMsg := bot.StartMessage(cfg.Rules(), cfg.Interval.Std(), cfg.Dedup.Cooldown.Std())
-	if err := notifier.Send(ctx, startMsg); err != nil {
-		log.Warn("startup notification not sent", "err", err)
-	}
-	b.Run(ctx)
+	b.Run(ctx) // announces the start in Telegram with the current index value
 	log.Info("bot stopped")
 	return nil
 }

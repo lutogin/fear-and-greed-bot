@@ -75,13 +75,19 @@ func New(source Source, notifier Notifier, rules alert.Rules, dd *dedup.Deduplic
 }
 
 // Check fetches the index once and sends a notification if a key level is
-// reached and the cooldown allows it. A notification that failed to send is
-// not recorded, so the next check tries again.
+// reached and the cooldown allows it.
 func (b *Bot) Check(ctx context.Context) error {
 	r, err := b.source.Fetch(ctx)
 	if err != nil {
 		return fmt.Errorf("fetch index: %w", err)
 	}
+	return b.process(ctx, r)
+}
+
+// process sends a notification if r reached a key level and the cooldown
+// allows it. A notification that failed to send is not recorded, so the next
+// check tries again.
+func (b *Bot) process(ctx context.Context, r fng.Reading) error {
 	log := b.log.With("value", r.Value, "zone", fng.Classify(r.Value), "as_of", r.Time)
 
 	a, ok := b.rules.Evaluate(r.Value)
@@ -107,12 +113,14 @@ func (b *Bot) Check(ctx context.Context) error {
 	return nil
 }
 
-// Run checks the index immediately and then every interval until ctx is
-// cancelled. A failed check is retried after the retry delay.
+// Run checks the index immediately, announces the start in Telegram with the
+// result, and then checks every interval until ctx is cancelled. A failed
+// check is retried after the retry delay.
 func (b *Bot) Run(ctx context.Context) {
+	err := b.start(ctx)
 	for {
 		wait := b.interval
-		if err := b.Check(ctx); err != nil {
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -125,5 +133,35 @@ func (b *Bot) Run(ctx context.Context) {
 			return
 		case <-time.After(wait):
 		}
+		err = b.Check(ctx)
 	}
+}
+
+// start is the first check. Its value goes into the startup message, which is
+// sent before a possible alert. The message is informational: if Telegram is
+// unavailable right now, the bot still runs and alerts are retried on their own.
+func (b *Bot) start(ctx context.Context) error {
+	r, fetchErr := b.source.Fetch(ctx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	next := b.interval
+	if fetchErr != nil {
+		next = b.retryDelay
+	}
+	msg := StartMessage(StartInfo{
+		Reading:   r,
+		FetchErr:  fetchErr,
+		Rules:     b.rules,
+		Interval:  b.interval,
+		Cooldown:  b.dedup.Cooldown(),
+		NextCheck: b.now().Add(next),
+	})
+	if err := b.notifier.Send(ctx, msg); err != nil {
+		b.log.Warn("startup notification not sent", "err", err)
+	}
+	if fetchErr != nil {
+		return fmt.Errorf("fetch index: %w", fetchErr)
+	}
+	return b.process(ctx, r)
 }

@@ -99,6 +99,88 @@ func fetch(t *testing.T, resp fakeResponse) (fng.Reading, *http.Request, error) 
 	return r, got, err
 }
 
+// realResponse loads a response of capi.coinglass.com recorded on 2026-09-24,
+// when the page showed 72 (Greed).
+func realResponse(t *testing.T) fakeResponse {
+	t.Helper()
+	raw, err := os.ReadFile("../../testdata/coinglass_history_2026-09-24.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec struct {
+		Headers map[string]string `json:"headers"`
+		Body    json.RawMessage   `json:"body"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	return fakeResponse{headers: rec.Headers, body: string(rec.Body)}
+}
+
+func TestFetchRealResponse(t *testing.T) {
+	r, _, err := fetch(t, realResponse(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := fng.Reading{Value: 72, Time: time.Date(2026, 9, 24, 0, 20, 1, 0, time.UTC), Price: 84400.7}
+	if r != want {
+		t.Errorf("reading = %+v, want %+v (the value the page showed)", r, want)
+	}
+}
+
+// The whole real payload backs the way it is read: the first chart is the
+// index, the other charts cannot be mistaken for it.
+func TestRealResponseStructure(t *testing.T) {
+	resp := realResponse(t)
+	var env envelope
+	if err := json.Unmarshal([]byte(resp.body), &env); err != nil {
+		t.Fatal(err)
+	}
+	h := http.Header{}
+	for k, v := range resp.headers {
+		h.Set(k, v)
+	}
+	payload, err := decodePayload(h, env.Data, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var charts []series
+	if err := json.Unmarshal(payload, &charts); err != nil {
+		t.Fatal(err)
+	}
+	if len(charts) < 2 {
+		t.Fatalf("got %d charts, want the index and the others", len(charts))
+	}
+
+	index := charts[0]
+	if len(index.Values) == 0 || len(index.Dates) != len(index.Values) || len(index.Prices) != len(index.Values) {
+		t.Fatalf("index chart: %d dates, %d prices, %d values", len(index.Dates), len(index.Prices), len(index.Values))
+	}
+	for i, v := range index.Values {
+		if v == nil || *v < 0 || *v > 100 {
+			t.Fatalf("index value #%d = %v, want 0..100", i, v)
+		}
+		if i > 0 && index.Dates[i] <= index.Dates[i-1] {
+			t.Fatalf("index dates must increase, #%d: %v after %v", i, index.Dates[i], index.Dates[i-1])
+		}
+	}
+	first, last := time.UnixMilli(int64(index.Dates[0])).UTC(), time.UnixMilli(int64(index.Dates[len(index.Dates)-1])).UTC()
+	t.Logf("index chart: %d values from %s to %s", len(index.Values), first.Format(time.DateOnly), last.Format(time.DateOnly))
+
+	for i, c := range charts[1:] {
+		outside := false
+		for _, v := range c.Values {
+			if v != nil && (*v < 0 || *v > 100) {
+				outside = true
+				break
+			}
+		}
+		if !outside {
+			t.Errorf("chart #%d also fits 0..100: the index could be mistaken for it", i+1)
+		}
+	}
+}
+
 func TestFetchDecryptsEveryKnownVersion(t *testing.T) {
 	for _, version := range []string{"0", "1", "2", "55", "66", "77"} {
 		t.Run("v="+version, func(t *testing.T) {
