@@ -15,18 +15,30 @@ import (
 	"time"
 )
 
-// coinglassReply writes a response of the fake capi.coinglass.com.
-type coinglassReply func(w http.ResponseWriter)
+// sourceReply writes a response of the fake index source.
+type sourceReply func(w http.ResponseWriter)
 
-// indexReply serves value as an unencrypted response, which the client also accepts.
-func indexReply(value string) coinglassReply {
+// indexReply serves value the way api.alternative.me does.
+func indexReply(value, classification string) sourceReply {
 	return func(w http.ResponseWriter) {
-		_, _ = io.WriteString(w, `{"code":"0","msg":"success","data":[{"dates":[1790209201000],"prices":[84400.7],"values":[`+value+`]}]}`)
+		_, _ = io.WriteString(w, `{"name":"Fear and Greed Index","data":[{"value":"`+value+
+			`","value_classification":"`+classification+`","timestamp":"1790294400","time_until_update":"3600"}],"metadata":{"error":null}}`)
 	}
 }
 
-// recordedReply replays a real response recorded on 2026-09-24, when the page showed 72 (Greed).
-func recordedReply(t *testing.T) coinglassReply {
+// recordedAlternativeReply replays a real response of api.alternative.me recorded on 2026-09-25.
+func recordedAlternativeReply(t *testing.T) sourceReply {
+	t.Helper()
+	body, err := os.ReadFile("testdata/alternative_fng_2026-09-25.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(w http.ResponseWriter) { _, _ = w.Write(body) }
+}
+
+// recordedCoinGlassReply replays a real response of capi.coinglass.com recorded
+// on 2026-09-24, when the page showed 72 (Greed).
+func recordedCoinGlassReply(t *testing.T) sourceReply {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/coinglass_history_2026-09-24.json")
 	if err != nil {
@@ -47,30 +59,22 @@ func recordedReply(t *testing.T) coinglassReply {
 	}
 }
 
-// changedEncryptionReply is what the bot sees after coinglass.com changes its encryption.
-func changedEncryptionReply(w http.ResponseWriter) {
-	w.Header().Set("encryption", "true")
-	w.Header().Set("user", "bmV3IGtleQ==")
-	w.Header().Set("v", "88")
-	_, _ = io.WriteString(w, `{"code":"0","msg":"success","data":"AAAA"}`)
-}
-
-// fakeServices stands in for capi.coinglass.com and the Telegram Bot API.
+// fakeServices stands in for the index source and the Telegram Bot API.
 type fakeServices struct {
-	coinglass *httptest.Server
-	telegram  *httptest.Server
+	source   *httptest.Server
+	telegram *httptest.Server
 
-	mu             sync.Mutex
-	coinglassCalls int
-	messages       []string
-	telegramDown   int // the next requests to fail with HTTP 500
+	mu           sync.Mutex
+	sourceCalls  []string // request URIs
+	messages     []string
+	telegramDown int // the next requests to fail with HTTP 500
 }
 
-func newFakeServices(t *testing.T, reply coinglassReply) *fakeServices {
+func newFakeServices(t *testing.T, reply sourceReply) *fakeServices {
 	f := &fakeServices{}
-	f.coinglass = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
-		f.coinglassCalls++
+		f.sourceCalls = append(f.sourceCalls, r.URL.RequestURI())
 		f.mu.Unlock()
 		reply(w)
 	}))
@@ -95,15 +99,15 @@ func newFakeServices(t *testing.T, reply coinglassReply) *fakeServices {
 		f.messages = append(f.messages, req.Text)
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
-	t.Cleanup(f.coinglass.Close)
+	t.Cleanup(f.source.Close)
 	t.Cleanup(f.telegram.Close)
 	return f
 }
 
-func (f *fakeServices) coinglassRequests() int {
+func (f *fakeServices) sourceRequests() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.coinglassCalls
+	return append([]string(nil), f.sourceCalls...)
 }
 
 func (f *fakeServices) sent() []string {
@@ -135,10 +139,11 @@ func (f *fakeServices) waitForMessages(t *testing.T, n int) []string {
 }
 
 func (f *fakeServices) options(configPath string) options {
-	return options{configPath: configPath, coinglassURL: f.coinglass.URL, telegramURL: f.telegram.URL}
+	return options{configPath: configPath, sourceURL: f.source.URL, telegramURL: f.telegram.URL}
 }
 
-func writeConfig(t *testing.T, statePath string) string {
+// writeConfig writes a config with fear 20 / greed 80 and the given extra YAML lines.
+func writeConfig(t *testing.T, statePath string, extra ...string) string {
 	t.Helper()
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	t.Setenv("TELEGRAM_CHAT_ID", "")
@@ -153,7 +158,7 @@ dedup:
 telegram:
   bot_token: "test:token"
   chat_id: 42
-`
+` + strings.Join(extra, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -180,19 +185,17 @@ func startDaemon(t *testing.T, opts options) {
 	})
 }
 
-// The whole bot on a real coinglass.com response: the startup message must
-// show the value the page showed.
-func TestDaemonStartupMessageFromRealResponse(t *testing.T) {
-	services := newFakeServices(t, recordedReply(t))
+// The whole bot, by default reading alternative.me, on a real response of its API.
+func TestDaemonStartupMessageFromRealAlternativeResponse(t *testing.T) {
+	services := newFakeServices(t, recordedAlternativeReply(t))
 	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
 
 	msg := services.waitForMessages(t, 1)[0]
 	t.Logf("startup message:\n%s", msg)
 	for _, want := range []string{
 		"🚀 <b>Fear &amp; Greed бот запущен</b>",
-		"Индекс сейчас: <b>72</b> (Greed)",
-		"BTC: $84,401",
-		"Данные на 24.09.2026 00:20 UTC",
+		"Индекс сейчас: <b>71</b> (Greed)",
+		`Данные <a href="https://alternative.me/crypto/fear-and-greed-index/">alternative.me</a> на 25.09.2026 00:00 UTC`,
 		"😱 страх: ≤ 20",
 		"🤑 жадность: ≥ 80",
 		"Проверка индекса: с интервалом 4 часа, следующая ",
@@ -202,30 +205,65 @@ func TestDaemonStartupMessageFromRealResponse(t *testing.T) {
 			t.Errorf("startup message does not contain %q", want)
 		}
 	}
+	if got := services.sourceRequests(); len(got) != 1 || got[0] != "/fng/?limit=1" {
+		t.Errorf("source requests = %q, want one GET /fng/?limit=1", got)
+	}
+}
+
+// The whole bot with source: coinglass on a real coinglass.com response: the
+// startup message must show the value the page showed.
+func TestDaemonStartupMessageFromRealCoinGlassResponse(t *testing.T) {
+	services := newFakeServices(t, recordedCoinGlassReply(t))
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), "source: coinglass")))
+
+	msg := services.waitForMessages(t, 1)[0]
+	t.Logf("startup message:\n%s", msg)
+	for _, want := range []string{
+		"Индекс сейчас: <b>72</b> (Greed)",
+		"BTC: $84,401",
+		`Данные <a href="https://www.coinglass.com/pro/i/FearGreedIndex">CoinGlass</a> на 24.09.2026 00:20 UTC`,
+		"😱 страх: ≤ 20",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("startup message does not contain %q", want)
+		}
+	}
+	if got := services.sourceRequests(); len(got) != 1 || !strings.HasPrefix(got[0], "/api/index/history") {
+		t.Errorf("source requests = %q, want one to /api/index/history", got)
+	}
 }
 
 func TestDaemonAnnouncesStartBeforeAlert(t *testing.T) {
-	services := newFakeServices(t, indexReply("15"))
+	services := newFakeServices(t, indexReply("15", "Extreme Fear"))
 	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
 
 	sent := services.waitForMessages(t, 2)
 	if !strings.Contains(sent[0], "Индекс сейчас: <b>15</b> (Extreme Fear)") {
 		t.Errorf("first message must be the startup one with the current value, got %q", sent[0])
 	}
-	if !strings.Contains(sent[1], "Fear &amp; Greed Index: 15") || !strings.Contains(sent[1], "≤ 20") {
+	if !strings.Contains(sent[1], "Fear &amp; Greed Index: 15") || !strings.Contains(sent[1], "≤ 20") ||
+		!strings.Contains(sent[1], ">alternative.me</a>") {
 		t.Errorf("the alert must follow the startup message, got %q", sent[1])
 	}
-	if got := services.coinglassRequests(); got != 1 {
-		t.Errorf("coinglass requested %d times, want 1 for both messages", got)
+	if got := services.sourceRequests(); len(got) != 1 {
+		t.Errorf("source requested %d times, want 1 for both messages", len(got))
 	}
+}
+
+// changedEncryptionReply is what the bot sees after coinglass.com changes its encryption.
+func changedEncryptionReply(w http.ResponseWriter) {
+	w.Header().Set("encryption", "true")
+	w.Header().Set("user", "bmV3IGtleQ==")
+	w.Header().Set("v", "88")
+	_, _ = io.WriteString(w, `{"code":"0","msg":"success","data":"AAAA"}`)
 }
 
 func TestDaemonReportsUnreadableIndexAtStartup(t *testing.T) {
 	services := newFakeServices(t, changedEncryptionReply)
-	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), "source: coinglass")))
 
 	msg := services.waitForMessages(t, 1)[0]
-	for _, want := range []string{"⚠️ Не удалось получить индекс", "unsupported encryption version", "страх: ≤ 20"} {
+	for _, want := range []string{"⚠️ Не удалось получить индекс с ", ">CoinGlass</a>: unsupported encryption version", "страх: ≤ 20"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("startup message %q does not contain %q", msg, want)
 		}
@@ -233,7 +271,7 @@ func TestDaemonReportsUnreadableIndexAtStartup(t *testing.T) {
 }
 
 func TestDaemonRunsWhenStartupMessageFails(t *testing.T) {
-	services := newFakeServices(t, indexReply("15"))
+	services := newFakeServices(t, indexReply("15", "Extreme Fear"))
 	services.failTelegram(1) // only the startup message is lost
 	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
 
@@ -246,7 +284,7 @@ func TestDaemonRunsWhenStartupMessageFails(t *testing.T) {
 // Runs the bot like a cron job would: every run is a new process, so the
 // cooldown must come from the state file. -once sends no startup message.
 func TestOnceRunsShareCooldownThroughStateFile(t *testing.T) {
-	services := newFakeServices(t, indexReply("15"))
+	services := newFakeServices(t, indexReply("15", "Extreme Fear"))
 	statePath := filepath.Join(t.TempDir(), "state", "state.json")
 	opts := services.options(writeConfig(t, statePath))
 	opts.once = true
@@ -270,7 +308,7 @@ func TestOnceRunsShareCooldownThroughStateFile(t *testing.T) {
 }
 
 func TestOnceWithoutKeyLevelSendsNothing(t *testing.T) {
-	services := newFakeServices(t, indexReply("50"))
+	services := newFakeServices(t, indexReply("50", "Neutral"))
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	opts := services.options(writeConfig(t, statePath))
 	opts.once = true
@@ -286,7 +324,7 @@ func TestOnceWithoutKeyLevelSendsNothing(t *testing.T) {
 }
 
 func TestTestMessageFlag(t *testing.T) {
-	services := newFakeServices(t, indexReply("50"))
+	services := newFakeServices(t, indexReply("50", "Neutral"))
 	opts := services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json")))
 	opts.testMessage = true
 	if err := run(context.Background(), quietLogger(), opts); err != nil {
@@ -299,7 +337,7 @@ func TestTestMessageFlag(t *testing.T) {
 }
 
 func TestRunStopsOnCancelledContext(t *testing.T) {
-	services := newFakeServices(t, indexReply("50"))
+	services := newFakeServices(t, indexReply("50", "Neutral"))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := run(ctx, quietLogger(), services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json")))); err != nil {

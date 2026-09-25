@@ -21,6 +21,8 @@ const (
 // Source provides the current index value.
 type Source interface {
 	Fetch(ctx context.Context) (fng.Reading, error)
+	// Provider is credited next to the data in every message.
+	Provider() fng.Provider
 }
 
 // Notifier delivers a message to the user.
@@ -88,7 +90,7 @@ func (b *Bot) Check(ctx context.Context) error {
 // allows it. A notification that failed to send is not recorded, so the next
 // check tries again.
 func (b *Bot) process(ctx context.Context, r fng.Reading) error {
-	log := b.log.With("value", r.Value, "zone", fng.Classify(r.Value), "as_of", r.Time)
+	log := b.log.With("value", r.Value, "zone", r.Zone, "as_of", r.Time)
 
 	a, ok := b.rules.Evaluate(r.Value)
 	if !ok {
@@ -103,7 +105,7 @@ func (b *Bot) process(ctx context.Context, r fng.Reading) error {
 			"last_sent_at", last.SentAt, "last_level", last.Level)
 		return nil
 	}
-	if err := b.notifier.Send(ctx, Message(r, a)); err != nil {
+	if err := b.notifier.Send(ctx, Message(b.source.Provider(), r, a)); err != nil {
 		return fmt.Errorf("send notification: %w", err)
 	}
 	if err := b.dedup.Mark(a, now); err != nil {
@@ -150,6 +152,7 @@ func (b *Bot) start(ctx context.Context) error {
 		next = b.retryDelay
 	}
 	msg := StartMessage(StartInfo{
+		Provider:  b.source.Provider(),
 		Reading:   r,
 		FetchErr:  fetchErr,
 		Rules:     b.rules,

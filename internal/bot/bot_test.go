@@ -36,8 +36,12 @@ func (s *fakeSource) Fetch(context.Context) (fng.Reading, error) {
 	if len(s.values) > 1 {
 		s.values = s.values[1:]
 	}
-	return fng.Reading{Value: v, Time: time.Date(2026, 9, 24, 0, 20, 0, 0, time.UTC)}, nil
+	return fng.Reading{Value: v, Zone: fng.Classify(v), Time: time.Date(2026, 9, 24, 0, 20, 0, 0, time.UTC)}, nil
 }
+
+var testProvider = fng.Provider{Name: "Test", URL: "https://example.com/fng"}
+
+func (s *fakeSource) Provider() fng.Provider { return testProvider }
 
 func (s *fakeSource) setValue(v float64) {
 	s.mu.Lock()
@@ -135,8 +139,11 @@ func TestCheckNotifiesWhenKeyLevelReached(t *testing.T) {
 			e := newEnv(defaultRules, tt.value)
 			e.check(t)
 			e.wantMessages(t, 1)
-			if msg := e.notifier.messages()[0]; !strings.Contains(msg, tt.want) {
-				t.Errorf("message %q does not contain %q", msg, tt.want)
+			msg := e.notifier.messages()[0]
+			for _, want := range []string{tt.want, `Данные <a href="https://example.com/fng">Test</a>`} {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message %q does not contain %q", msg, want)
+				}
 			}
 			rec, ok := e.store.Get(string(tt.side))
 			if !ok || rec.Level != tt.level || rec.Value != tt.value || !rec.SentAt.Equal(e.clock.now) {
@@ -299,7 +306,7 @@ func TestRunAnnouncesStartWithCurrentValue(t *testing.T) {
 	for _, want := range []string{
 		"бот запущен",
 		"Индекс сейчас: <b>50</b> (Neutral)",
-		"Данные на 24.09.2026 00:20 UTC",
+		`Данные <a href="https://example.com/fng">Test</a> на 24.09.2026 00:20 UTC`,
 		"страх: ≤ 25",
 		"жадность: ≥ 75",
 		"с интервалом 4 часа, следующая 24.09.2026 12:00 UTC", // the clock is at 08:00
@@ -324,10 +331,10 @@ func TestRunAnnouncesStartBeforeAlert(t *testing.T) {
 
 func TestRunAnnouncesFetchError(t *testing.T) {
 	e := newEnv(defaultRules, 18)
-	e.source.errs = []error{errors.New(`unsupported encryption version v="88"`)}
+	e.source.errs = []error{errors.New("unexpected HTTP status 503 Service Unavailable")}
 	msgs := e.runUntilMessages(t, 1)
 	for _, want := range []string{
-		"Не удалось получить индекс: unsupported encryption version",
+		`Не удалось получить индекс с <a href="https://example.com/fng">Test</a>: unexpected HTTP status 503`,
 		"следующая 24.09.2026 08:05 UTC", // retried after the default 5 minutes
 	} {
 		if !strings.Contains(msgs[0], want) {

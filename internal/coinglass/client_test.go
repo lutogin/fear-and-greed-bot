@@ -24,7 +24,7 @@ const historyPayload = `[
 var (
 	testNow     = time.Date(2026, 9, 24, 17, 54, 31, 655_000_000, time.UTC)
 	testTS      = strconv.FormatInt(testNow.UnixMilli(), 10)
-	wantReading = fng.Reading{Value: 72, Time: time.Date(2026, 9, 24, 0, 20, 1, 0, time.UTC), Price: 84400.7}
+	wantReading = fng.Reading{Value: 72, Zone: fng.Greed, Time: time.Date(2026, 9, 24, 0, 20, 1, 0, time.UTC), Price: 84400.7}
 )
 
 const (
@@ -122,7 +122,7 @@ func TestFetchRealResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := fng.Reading{Value: 72, Time: time.Date(2026, 9, 24, 0, 20, 1, 0, time.UTC), Price: 84400.7}
+	want := fng.Reading{Value: 72, Zone: fng.Greed, Time: time.Date(2026, 9, 24, 0, 20, 1, 0, time.UTC), Price: 84400.7}
 	if r != want {
 		t.Errorf("reading = %+v, want %+v (the value the page showed)", r, want)
 	}
@@ -248,7 +248,7 @@ func TestFetchSkipsTrailingNulls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := fng.Reading{Value: 55, Time: time.UnixMilli(1790122801000).UTC()}
+	want := fng.Reading{Value: 55, Zone: fng.Neutral, Time: time.UnixMilli(1790122801000).UTC()}
 	if r != want {
 		t.Errorf("reading = %+v, want %+v", r, want)
 	}
@@ -290,6 +290,13 @@ func TestFetchErrors(t *testing.T) {
 				t.Fatalf("Fetch() = %+v, %v; want error containing %q", r, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestProvider(t *testing.T) {
+	p := NewClient(http.DefaultClient).Provider()
+	if p.Name != "CoinGlass" || p.URL != PageURL {
+		t.Errorf("provider = %+v", p)
 	}
 }
 

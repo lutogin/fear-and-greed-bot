@@ -27,6 +27,7 @@ func clearEnv(t *testing.T) {
 func TestLoad(t *testing.T) {
 	clearEnv(t)
 	path := writeConfig(t, `
+source: coinglass
 # every four hours
 interval: 4h
 alerts:
@@ -43,6 +44,9 @@ telegram:
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if cfg.Source != SourceCoinGlass {
+		t.Errorf("source = %q", cfg.Source)
 	}
 	if cfg.Interval.Std() != 4*time.Hour {
 		t.Errorf("interval = %s", cfg.Interval)
@@ -75,8 +79,9 @@ telegram:
 		t.Fatal(err)
 	}
 	def := Default()
-	if cfg.Interval != def.Interval || cfg.Dedup != def.Dedup {
-		t.Errorf("got interval %s, dedup %+v; want the defaults %s, %+v", cfg.Interval, cfg.Dedup, def.Interval, def.Dedup)
+	if cfg.Source != SourceAlternative || cfg.Interval != def.Interval || cfg.Dedup != def.Dedup {
+		t.Errorf("got source %q, interval %s, dedup %+v; want the defaults %q, %s, %+v",
+			cfg.Source, cfg.Interval, cfg.Dedup, def.Source, def.Interval, def.Dedup)
 	}
 	if len(cfg.Alerts.Greed) != 0 {
 		t.Errorf("greed levels must not get defaults, got %v", cfg.Alerts.Greed)
@@ -116,6 +121,7 @@ telegram:
 		wantErr []string
 	}{
 		{"typo in a key", valid + "intreval: 4h\n", []string{"intreval"}},
+		{"unknown source", valid + "source: binance\n", []string{`source must be "alternative" or "coinglass"`}},
 		{"bad duration", valid + "interval: soon\n", []string{"invalid duration"}},
 		{"all decode errors at once", valid + "intreval: 4h\ndedup:\n  cooldown: 2weeks\n", []string{"intreval", "2weeks"}},
 		{"too frequent", valid + "interval: 10s\n", []string{"at least 1m"}},
@@ -156,8 +162,9 @@ func TestExampleConfigIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Interval.Std() != 4*time.Hour || cfg.Dedup.Cooldown.Std() != 48*time.Hour {
-		t.Errorf("example config: interval %s, cooldown %s; want 4h and 2d", cfg.Interval, cfg.Dedup.Cooldown)
+	if cfg.Source != SourceAlternative || cfg.Interval.Std() != 4*time.Hour || cfg.Dedup.Cooldown.Std() != 48*time.Hour {
+		t.Errorf("example config: source %q, interval %s, cooldown %s; want alternative, 4h and 2d",
+			cfg.Source, cfg.Interval, cfg.Dedup.Cooldown)
 	}
 }
 

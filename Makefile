@@ -9,9 +9,9 @@ build:
 test:
 	go test -race ./...
 
-# Queries the real coinglass.com: checks that the site still speaks the protocol the bot expects.
+# Queries the real providers: checks that they still speak the protocol the bot expects.
 test-live:
-	FNG_LIVE_TEST=1 go test ./internal/coinglass -run Live -v -count=1
+	FNG_LIVE_TEST=1 go test ./internal/alternative ./internal/coinglass -run Live -v -count=1
 
 lint:
 	test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)

@@ -1,5 +1,5 @@
-// Command fngbot watches the CoinGlass Crypto Fear & Greed Index and notifies
-// a Telegram chat when the index reaches configured key levels.
+// Command fngbot watches the Crypto Fear & Greed Index (alternative.me or
+// CoinGlass) and notifies a Telegram chat when the index reaches configured key levels.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"fear-and-greed-bot/internal/alternative"
 	"fear-and-greed-bot/internal/bot"
 	"fear-and-greed-bot/internal/coinglass"
 	"fear-and-greed-bot/internal/config"
@@ -43,8 +44,8 @@ type options struct {
 	testMessage bool
 
 	// Service URLs, empty for the real ones; tests point them to fakes.
-	coinglassURL string
-	telegramURL  string
+	sourceURL   string
+	telegramURL string
 }
 
 func run(ctx context.Context, log *slog.Logger, opts options) error {
@@ -53,11 +54,8 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		return err
 	}
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	source := coinglass.NewClient(httpClient)
+	source := newSource(cfg.Source, httpClient, opts.sourceURL)
 	notifier := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.ChatID, httpClient)
-	if opts.coinglassURL != "" {
-		source.BaseURL = opts.coinglassURL
-	}
 	if opts.telegramURL != "" {
 		notifier.BaseURL = opts.telegramURL
 	}
@@ -67,7 +65,7 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		if err != nil {
 			return fmt.Errorf("fetch index: %w", err)
 		}
-		if err := notifier.Send(ctx, bot.TestMessage(r)); err != nil {
+		if err := notifier.Send(ctx, bot.TestMessage(source.Provider(), r)); err != nil {
 			return err
 		}
 		log.Info("test message sent", "value", r.Value)
@@ -92,6 +90,22 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	b.Run(ctx) // announces the start in Telegram with the current index value
 	log.Info("bot stopped")
 	return nil
+}
+
+// newSource returns the configured index source; baseURL, if set, replaces its API host.
+func newSource(name string, httpClient *http.Client, baseURL string) bot.Source {
+	if name == config.SourceCoinGlass {
+		c := coinglass.NewClient(httpClient)
+		if baseURL != "" {
+			c.BaseURL = baseURL
+		}
+		return c
+	}
+	c := alternative.NewClient(httpClient)
+	if baseURL != "" {
+		c.BaseURL = baseURL
+	}
+	return c
 }
 
 func openStore(c config.DedupConfig) (dedup.Store, error) {

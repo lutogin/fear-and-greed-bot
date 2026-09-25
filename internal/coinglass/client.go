@@ -45,6 +45,11 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{BaseURL: DefaultBaseURL, HTTP: httpClient, Now: time.Now}
 }
 
+// Provider credits CoinGlass as the source of the data.
+func (c *Client) Provider() fng.Provider {
+	return fng.Provider{Name: "CoinGlass", URL: PageURL}
+}
+
 type envelope struct {
 	Code json.RawMessage `json:"code"` // "0" on success
 	Msg  string          `json:"msg"`
@@ -147,7 +152,7 @@ func parseReading(payload []byte) (fng.Reading, error) {
 		if *v < 0 || *v > 100 {
 			return fng.Reading{}, fmt.Errorf("index value %v is outside of 0..100", *v)
 		}
-		r := fng.Reading{Value: *v}
+		r := fng.Reading{Value: *v, Zone: fng.Classify(*v)}
 		if i < len(s.Dates) && s.Dates[i] > 0 {
 			r.Time = time.UnixMilli(int64(s.Dates[i])).UTC()
 		}

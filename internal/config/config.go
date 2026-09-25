@@ -17,10 +17,13 @@ import (
 )
 
 const (
+	SourceAlternative = "alternative"
+	SourceCoinGlass   = "coinglass"
+
 	StorageFile   = "file"
 	StorageMemory = "memory"
 
-	// MinInterval keeps the bot from hammering coinglass.com.
+	// MinInterval keeps the bot from hammering the index provider.
 	MinInterval = time.Minute
 
 	EnvBotToken = "TELEGRAM_BOT_TOKEN"
@@ -28,6 +31,9 @@ const (
 )
 
 type Config struct {
+	// Source of the index: "alternative" (the alternative.me API) or
+	// "coinglass" (the data of the coinglass.com page).
+	Source string `yaml:"source"`
 	// Interval between index checks.
 	Interval Duration       `yaml:"interval"`
 	Alerts   AlertsConfig   `yaml:"alerts"`
@@ -59,6 +65,7 @@ type TelegramConfig struct {
 // Default returns the configuration used for options missing from the file.
 func Default() Config {
 	return Config{
+		Source:   SourceAlternative,
 		Interval: Duration(4 * time.Hour),
 		Dedup: DedupConfig{
 			Cooldown: Duration(48 * time.Hour),
@@ -96,6 +103,9 @@ func Load(path string) (Config, error) {
 // Validate reports all problems of the configuration at once.
 func (c Config) Validate() error {
 	var errs []error
+	if c.Source != SourceAlternative && c.Source != SourceCoinGlass {
+		errs = append(errs, fmt.Errorf("source must be %q or %q, got %q", SourceAlternative, SourceCoinGlass, c.Source))
+	}
 	if c.Interval.Std() < MinInterval {
 		errs = append(errs, fmt.Errorf("interval must be at least %s", MinInterval))
 	}

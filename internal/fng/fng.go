@@ -6,11 +6,20 @@ import "time"
 // Reading is a single value of the index.
 type Reading struct {
 	Value float64   // 0 (extreme fear) .. 100 (extreme greed)
+	Zone  Zone      // the provider's classification of Value, empty if unknown
 	Time  time.Time // moment the value refers to, zero if unknown
 	Price float64   // BTC price at Time, 0 if unknown
 }
 
-// Zone is the sentiment band of an index value, named as on coinglass.com.
+// Provider is who publishes the index. Providers differ in methodology, so
+// their values differ, and alternative.me requires crediting it next to the data.
+type Provider struct {
+	Name string // shown in messages, e.g. "alternative.me"
+	URL  string // page with the index
+}
+
+// Zone is the sentiment band of an index value. Both alternative.me and
+// coinglass.com use these names, with different bands.
 type Zone string
 
 const (
@@ -21,7 +30,7 @@ const (
 	ExtremeGreed Zone = "Extreme Greed"
 )
 
-// Classify returns the zone of v using the same bands as the CoinGlass page.
+// Classify returns the zone of v using the bands of the CoinGlass page.
 func Classify(v float64) Zone {
 	switch {
 	case v <= 20:

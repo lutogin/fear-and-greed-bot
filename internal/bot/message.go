@@ -11,26 +11,25 @@ import (
 	"unicode/utf8"
 
 	"fear-and-greed-bot/internal/alert"
-	"fear-and-greed-bot/internal/coinglass"
 	"fear-and-greed-bot/internal/fng"
 )
 
 // Message is the Telegram notification (HTML) about a reached key level.
-func Message(r fng.Reading, a alert.Alert) string {
+func Message(p fng.Provider, r fng.Reading, a alert.Alert) string {
 	icon, what := "😱", "страха"
 	if a.Side == alert.SideGreed {
 		icon, what = "🤑", "жадности"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s <b>Fear &amp; Greed Index: %s</b> (%s)\n", icon, number(r.Value), zone(r.Value))
+	fmt.Fprintf(&b, "%s <b>Fear &amp; Greed Index: %s</b>%s\n", icon, number(r.Value), zone(r))
 	fmt.Fprintf(&b, "Достигнут ключевой уровень %s: %s %s\n", what, sign(a.Side), number(a.Level))
-	writeReading(&b, r)
-	b.WriteString(coinglass.PageURL)
-	return b.String()
+	writeReading(&b, p, r)
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // StartInfo is what the startup message reports.
 type StartInfo struct {
+	Provider  fng.Provider
 	Reading   fng.Reading // the current index value, valid when FetchErr is nil
 	FetchErr  error       // why the current value could not be read
 	Rules     alert.Rules
@@ -40,7 +39,7 @@ type StartInfo struct {
 }
 
 // StartMessage announces that the bot is running: the current index value,
-// which also shows that coinglass.com is still read correctly, the key levels
+// which also shows that the source is still read correctly, the key levels
 // and the schedule.
 func StartMessage(s StartInfo) string {
 	pause := "нет"
@@ -50,10 +49,14 @@ func StartMessage(s StartInfo) string {
 	var b strings.Builder
 	b.WriteString("🚀 <b>Fear &amp; Greed бот запущен</b>\n\n")
 	if s.FetchErr != nil {
-		fmt.Fprintf(&b, "⚠️ Не удалось получить индекс: %s\n\n", html.EscapeString(truncate(s.FetchErr.Error(), 300)))
+		from := ""
+		if s.Provider.Name != "" {
+			from = " с " + credit(s.Provider)
+		}
+		fmt.Fprintf(&b, "⚠️ Не удалось получить индекс%s: %s\n\n", from, html.EscapeString(truncate(s.FetchErr.Error(), 300)))
 	} else {
-		fmt.Fprintf(&b, "Индекс сейчас: <b>%s</b> (%s)\n", number(s.Reading.Value), zone(s.Reading.Value))
-		writeReading(&b, s.Reading)
+		fmt.Fprintf(&b, "Индекс сейчас: <b>%s</b>%s\n", number(s.Reading.Value), zone(s.Reading))
+		writeReading(&b, s.Provider, s.Reading)
 		b.WriteString("\n")
 	}
 	b.WriteString("Пороги:\n")
@@ -61,34 +64,53 @@ func StartMessage(s StartInfo) string {
 	fmt.Fprintf(&b, "🤑 жадность: %s\n\n", levels(alert.SideGreed, s.Rules.Greed))
 	fmt.Fprintf(&b, "Проверка индекса: с интервалом %s, следующая %s UTC\n",
 		humanDuration(s.Interval), s.NextCheck.UTC().Format(timeLayout))
-	fmt.Fprintf(&b, "Пауза между повторными уведомлениями: %s\n", pause)
-	b.WriteString(coinglass.PageURL)
+	fmt.Fprintf(&b, "Пауза между повторными уведомлениями: %s", pause)
 	return b.String()
 }
 
 // TestMessage is sent by the -test-message flag to check the setup.
-func TestMessage(r fng.Reading) string {
+func TestMessage(p fng.Provider, r fng.Reading) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "✅ Бот подключён. <b>Fear &amp; Greed Index: %s</b> (%s)\n", number(r.Value), zone(r.Value))
-	writeReading(&b, r)
-	b.WriteString(coinglass.PageURL)
-	return b.String()
+	fmt.Fprintf(&b, "✅ Бот подключён. <b>Fear &amp; Greed Index: %s</b>%s\n", number(r.Value), zone(r))
+	writeReading(&b, p, r)
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 const timeLayout = "02.01.2006 15:04"
 
-// writeReading adds the BTC price and the time of the value, when known.
-func writeReading(b *strings.Builder, r fng.Reading) {
+// writeReading adds the BTC price, when known, and credits the provider next
+// to the data, as alternative.me asks: "Данные alternative.me на 25.09.2026 00:00 UTC".
+func writeReading(b *strings.Builder, p fng.Provider, r fng.Reading) {
 	if r.Price > 0 {
 		fmt.Fprintf(b, "BTC: %s\n", usd(r.Price))
 	}
+	parts := []string{"Данные"}
+	if p.Name != "" {
+		parts = append(parts, credit(p))
+	}
 	if !r.Time.IsZero() {
-		fmt.Fprintf(b, "Данные на %s UTC\n", r.Time.UTC().Format(timeLayout))
+		parts = append(parts, "на "+r.Time.UTC().Format(timeLayout)+" UTC")
+	}
+	if len(parts) > 1 {
+		b.WriteString(strings.Join(parts, " ") + "\n")
 	}
 }
 
-func zone(v float64) string {
-	return html.EscapeString(string(fng.Classify(v)))
+// credit is the provider's name linked to its page.
+func credit(p fng.Provider) string {
+	name := html.EscapeString(p.Name)
+	if p.URL == "" {
+		return name
+	}
+	return `<a href="` + html.EscapeString(p.URL) + `">` + name + "</a>"
+}
+
+// zone is " (Greed)" for a reading with a known zone, otherwise empty.
+func zone(r fng.Reading) string {
+	if r.Zone == "" {
+		return ""
+	}
+	return " (" + html.EscapeString(string(r.Zone)) + ")"
 }
 
 // truncate keeps at most n runes of s.
