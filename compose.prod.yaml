@@ -1,0 +1,16 @@
+services:
+  fngbot:
+    image: lutogin/fear-and-greed-bot:latest
+    restart: unless-stopped
+    environment:
+      # Taken from .env next to this file, so the secrets stay out of config.yaml.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_GROUP_CHAT_ID: ${TELEGRAM_GROUP_CHAT_ID:-}
+      TELEGRAM_TOPIC_ID: ${TELEGRAM_TOPIC_ID:-}
+    volumes:
+      - ./config.yaml:/config.yaml:ro
+      - fngbot-data:/data
+
+volumes:
+  fngbot-data:

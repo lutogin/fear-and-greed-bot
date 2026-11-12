@@ -18,15 +18,15 @@ crypto:
   # Это разные индексы с разной методикой, поэтому значения у источников не совпадают.
   source: alternative
   alerts:
-    fear: [20]
-    greed: [80]
+    fear: [19]
+    greed: [81]
 
 stocks:
   # cnn — CNN Fear & Greed Index (edition.cnn.com/markets/fear-and-greed), пока единственный источник.
   source: cnn
   alerts:
-    fear: [25]
-    greed: [75]
+    fear: [20]
+    greed: [80]
 
 dedup:
   # Не повторять уведомление по той же стороне (fear/greed) того же индекса чаще,
