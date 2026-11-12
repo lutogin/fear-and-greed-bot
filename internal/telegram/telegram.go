@@ -15,20 +15,23 @@ import (
 
 const DefaultBaseURL = "https://api.telegram.org"
 
-// Client sends messages to one chat.
+// Client sends messages to one chat or to one forum topic of a group.
 type Client struct {
 	BaseURL string
 	Token   string
 	ChatID  string
+	// TopicID is the forum topic (message_thread_id) of the chat; 0 posts to the chat itself.
+	TopicID int64
 	HTTP    *http.Client
 }
 
-func New(token, chatID string, httpClient *http.Client) *Client {
-	return &Client{BaseURL: DefaultBaseURL, Token: token, ChatID: chatID, HTTP: httpClient}
+func New(token, chatID string, topicID int64, httpClient *http.Client) *Client {
+	return &Client{BaseURL: DefaultBaseURL, Token: token, ChatID: chatID, TopicID: topicID, HTTP: httpClient}
 }
 
 type sendMessageRequest struct {
 	ChatID             string             `json:"chat_id"`
+	MessageThreadID    int64              `json:"message_thread_id,omitempty"`
 	Text               string             `json:"text"`
 	ParseMode          string             `json:"parse_mode"`
 	LinkPreviewOptions linkPreviewOptions `json:"link_preview_options"`
@@ -48,6 +51,7 @@ type apiResponse struct {
 func (c *Client) Send(ctx context.Context, text string) error {
 	body, err := json.Marshal(sendMessageRequest{
 		ChatID:             c.ChatID,
+		MessageThreadID:    c.TopicID,
 		Text:               text,
 		ParseMode:          "HTML",
 		LinkPreviewOptions: linkPreviewOptions{IsDisabled: true},

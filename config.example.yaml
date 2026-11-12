@@ -40,5 +40,17 @@ dedup:
 telegram:
   # Токен бота от @BotFather. Можно не хранить в файле, а передать в TELEGRAM_BOT_TOKEN.
   bot_token: "123456789:REPLACE_WITH_YOUR_BOT_TOKEN"
-  # Кому слать: id пользователя, группы (-100...) или @имя_канала. Или TELEGRAM_CHAT_ID.
+
+  # Куда слать — один из двух вариантов, задать оба сразу нельзя.
+  #
+  # 1. Чат: id пользователя, группы (-100...) или @имя_канала. Или TELEGRAM_CHAT_ID.
   chat_id: "123456789"
+  group_chat_id: "-1001234567890"
+  topic_id: "8457"
+  #
+  # 2. Топик группы с включёнными темами. Уберите chat_id и раскомментируйте:
+  #    group_chat_id — id группы (-100...), или TELEGRAM_GROUP_CHAT_ID;
+  #    topic_id      — id топика (message_thread_id), или TELEGRAM_TOPIC_ID.
+  #                    Без topic_id сообщения уходят в общий чат группы.
+  # group_chat_id: "-1001234567890"
+  # topic_id: 42

@@ -13,7 +13,7 @@ import (
 const testToken = "123456789:AAE-secret_token"
 
 func newTestClient(srv *httptest.Server) *Client {
-	c := New(testToken, "-1001234567890", srv.Client())
+	c := New(testToken, "-1001234567890", 0, srv.Client())
 	c.BaseURL = srv.URL
 	return c
 }
@@ -53,6 +53,26 @@ func TestSend(t *testing.T) {
 	wantJSON, _ := json.Marshal(want)
 	if string(gotJSON) != string(wantJSON) {
 		t.Errorf("body = %s, want %s", gotJSON, wantJSON)
+	}
+}
+
+func TestSendToTopic(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":{"message_id":1}}`))
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	c.TopicID = 42
+	if err := c.Send(context.Background(), "hi"); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["chat_id"] != "-1001234567890" || gotBody["message_thread_id"] != float64(42) {
+		t.Errorf("body = %v, want chat_id -1001234567890 and message_thread_id 42", gotBody)
 	}
 }
 

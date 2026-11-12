@@ -60,7 +60,8 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 	}
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	indexes := newIndexes(cfg, httpClient, opts)
-	notifier := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.ChatID, httpClient)
+	chatID, topicID := cfg.Telegram.Destination()
+	notifier := telegram.New(cfg.Telegram.BotToken, chatID, topicID, httpClient)
 	if opts.telegramURL != "" {
 		notifier.BaseURL = opts.telegramURL
 	}
@@ -81,7 +82,10 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		return b.Check(ctx)
 	}
 
-	attrs := []any{"interval", cfg.Interval, "cooldown", cfg.Dedup.Cooldown, "storage", cfg.Dedup.Storage}
+	attrs := []any{"interval", cfg.Interval, "cooldown", cfg.Dedup.Cooldown, "storage", cfg.Dedup.Storage, "chat_id", chatID}
+	if topicID != 0 {
+		attrs = append(attrs, "topic_id", topicID)
+	}
 	for _, idx := range indexes {
 		attrs = append(attrs, slog.Group(string(idx.Market),
 			"source", idx.Source.Provider().Name, "fear_levels", idx.Rules.Fear, "greed_levels", idx.Rules.Greed))

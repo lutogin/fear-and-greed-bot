@@ -30,8 +30,10 @@ const (
 	// MinInterval keeps the bot from hammering the index provider.
 	MinInterval = time.Minute
 
-	EnvBotToken = "TELEGRAM_BOT_TOKEN"
-	EnvChatID   = "TELEGRAM_CHAT_ID"
+	EnvBotToken    = "TELEGRAM_BOT_TOKEN"
+	EnvChatID      = "TELEGRAM_CHAT_ID"
+	EnvGroupChatID = "TELEGRAM_GROUP_CHAT_ID"
+	EnvTopicID     = "TELEGRAM_TOPIC_ID"
 )
 
 type Config struct {
@@ -78,9 +80,24 @@ type DedupConfig struct {
 	File string `yaml:"file"`
 }
 
+// TelegramConfig sets where messages go: either ChatID or GroupChatID, the
+// latter optionally with the forum topic TopicID.
 type TelegramConfig struct {
 	BotToken string `yaml:"bot_token"`
-	ChatID   string `yaml:"chat_id"`
+	// ChatID is a user, a group or a channel (@name).
+	ChatID string `yaml:"chat_id"`
+	// GroupChatID is a group whose topic TopicID receives the messages.
+	GroupChatID string `yaml:"group_chat_id"`
+	// TopicID is the message_thread_id of the topic; 0 posts to the group itself.
+	TopicID TopicID `yaml:"topic_id"`
+}
+
+// Destination returns the chat to send messages to and its forum topic, 0 for none.
+func (c TelegramConfig) Destination() (chatID string, topicID int64) {
+	if c.GroupChatID != "" {
+		return c.GroupChatID, int64(c.TopicID)
+	}
+	return c.ChatID, 0
 }
 
 // Default returns the configuration used for options missing from the file.
@@ -122,6 +139,16 @@ func Load(path string) (Config, error) {
 	if v := os.Getenv(EnvChatID); v != "" {
 		cfg.Telegram.ChatID = v
 	}
+	if v := os.Getenv(EnvGroupChatID); v != "" {
+		cfg.Telegram.GroupChatID = v
+	}
+	if v := os.Getenv(EnvTopicID); v != "" {
+		id, err := ParseTopicID(v)
+		if err != nil {
+			return Config{}, fmt.Errorf("%s: %w", EnvTopicID, err)
+		}
+		cfg.Telegram.TopicID = id
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("invalid config %s:\n%w", path, err)
 	}
@@ -161,8 +188,24 @@ func (c Config) Validate() error {
 	if c.Telegram.BotToken == "" {
 		errs = append(errs, fmt.Errorf("telegram.bot_token is required (or set %s)", EnvBotToken))
 	}
-	if c.Telegram.ChatID == "" {
-		errs = append(errs, fmt.Errorf("telegram.chat_id is required (or set %s)", EnvChatID))
+	errs = append(errs, c.Telegram.validateDestination())
+	return errors.Join(errs...)
+}
+
+func (c TelegramConfig) validateDestination() error {
+	var errs []error
+	switch {
+	case c.ChatID == "" && c.GroupChatID == "":
+		errs = append(errs, fmt.Errorf("telegram.chat_id or telegram.group_chat_id is required (or set %s or %s)", EnvChatID, EnvGroupChatID))
+	case c.ChatID != "" && c.GroupChatID != "":
+		errs = append(errs, fmt.Errorf("telegram.chat_id (%s) and telegram.group_chat_id (%s) are mutually exclusive: "+
+			"keep chat_id to send to a chat, or group_chat_id with topic_id to send to a group topic", EnvChatID, EnvGroupChatID))
+	}
+	if c.TopicID < 0 {
+		errs = append(errs, fmt.Errorf("telegram.topic_id must be positive, got %d", c.TopicID))
+	}
+	if c.TopicID != 0 && c.GroupChatID == "" {
+		errs = append(errs, errors.New("telegram.topic_id requires telegram.group_chat_id"))
 	}
 	return errors.Join(errs...)
 }
@@ -181,6 +224,32 @@ func validateIndex(name string, c IndexConfig, sources ...string) error {
 		errs = append(errs, fmt.Errorf("%s.alerts: %w", name, err))
 	}
 	return errors.Join(errs...)
+}
+
+// TopicID is the id of a forum topic. YAML accepts it with or without quotes,
+// like chat_id.
+type TopicID int64
+
+// ParseTopicID parses the decimal id of a forum topic.
+func ParseTopicID(s string) (TopicID, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("topic_id must be an integer, got %q", s)
+	}
+	return TopicID(id), nil
+}
+
+func (t *TopicID) UnmarshalYAML(n *yaml.Node) error {
+	id, err := ParseTopicID(n.Value)
+	if n.Kind != yaml.ScalarNode {
+		err = errors.New("topic_id must be an integer")
+	}
+	if err != nil {
+		// A TypeError lets the decoder report it together with the other problems.
+		return &yaml.TypeError{Errors: []string{fmt.Sprintf("line %d: %v", n.Line, err)}}
+	}
+	*t = id
+	return nil
 }
 
 // Duration is a time.Duration that also accepts days in YAML, e.g. "2d" or "1d12h".

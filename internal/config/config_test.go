@@ -22,6 +22,8 @@ func writeConfig(t *testing.T, content string) string {
 func clearEnv(t *testing.T) {
 	t.Setenv(EnvBotToken, "")
 	t.Setenv(EnvChatID, "")
+	t.Setenv(EnvGroupChatID, "")
+	t.Setenv(EnvTopicID, "")
 }
 
 func TestLoad(t *testing.T) {
@@ -115,6 +117,78 @@ func TestLoadSingleIndex(t *testing.T) {
 	}
 }
 
+func TestLoadGroupTopic(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load(writeConfig(t, `
+crypto:
+  alerts:
+    fear: [20]
+telegram:
+  bot_token: "123:abc"
+  group_chat_id: -1001234567890
+  topic_id: 42
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat, topic := cfg.Telegram.Destination(); chat != "-1001234567890" || topic != 42 {
+		t.Errorf("destination = %q, topic %d; want the group topic", chat, topic)
+	}
+}
+
+func TestTopicIDForms(t *testing.T) {
+	clearEnv(t)
+	for _, tt := range []struct {
+		value   string
+		want    int64
+		wantErr bool
+	}{{"42", 42, false}, {`"42"`, 42, false}, {"", 0, false}, {`""`, 0, true}} {
+		t.Run(tt.value, func(t *testing.T) {
+			cfg, err := Load(writeConfig(t, "crypto:\n  alerts:\n    fear: [20]\ntelegram:\n  bot_token: x\n  group_chat_id: y\n  topic_id: "+tt.value+"\n"))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, topic := cfg.Telegram.Destination(); topic != tt.want {
+				t.Errorf("topic = %d, want %d", topic, tt.want)
+			}
+		})
+	}
+}
+
+func TestDestinationOfChat(t *testing.T) {
+	if chat, topic := (TelegramConfig{ChatID: "42"}).Destination(); chat != "42" || topic != 0 {
+		t.Errorf("destination = %q, topic %d; want chat 42 without a topic", chat, topic)
+	}
+}
+
+func TestLoadGroupTopicFromEnvironment(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(EnvGroupChatID, "-100777")
+	t.Setenv(EnvTopicID, "5")
+	cfg, err := Load(writeConfig(t, "crypto:\n  alerts:\n    fear: [20]\ntelegram:\n  bot_token: x\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat, topic := cfg.Telegram.Destination(); chat != "-100777" || topic != 5 {
+		t.Errorf("destination = %q, topic %d; want values from the environment", chat, topic)
+	}
+}
+
+func TestLoadInvalidTopicFromEnvironment(t *testing.T) {
+	clearEnv(t)
+	t.Setenv(EnvTopicID, "general")
+	_, err := Load(writeConfig(t, "crypto:\n  alerts:\n    fear: [20]\ntelegram:\n  bot_token: x\n  group_chat_id: y\n"))
+	if err == nil || !strings.Contains(err.Error(), EnvTopicID) {
+		t.Fatalf("err = %v, want an error about %s", err, EnvTopicID)
+	}
+}
+
 func TestLoadEnvironmentOverrides(t *testing.T) {
 	t.Setenv(EnvBotToken, "env:token")
 	t.Setenv(EnvChatID, "777")
@@ -166,6 +240,11 @@ telegram:
 		{"overlapping alerts", "stocks:\n  alerts:\n    fear: [60]\n    greed: [40]\ntelegram:\n  bot_token: x\n  chat_id: y\n", []string{"stocks.alerts: fear levels must be lower than greed"}},
 		{"level out of range", "crypto:\n  alerts:\n    greed: [150]\ntelegram:\n  bot_token: x\n  chat_id: y\n", []string{"crypto.alerts: level 150 is outside of 0..100"}},
 		{"empty file", "", []string{"telegram.bot_token", "at least one index"}},
+		{"chat and group", valid + "  group_chat_id: \"-100777\"\n  topic_id: 5\n", []string{"mutually exclusive"}},
+		{"topic without group", valid + "  topic_id: 5\n", []string{"telegram.topic_id requires telegram.group_chat_id"}},
+		{"negative topic", "crypto:\n  alerts:\n    fear: [25]\ntelegram:\n  bot_token: x\n  group_chat_id: y\n  topic_id: -5\n", []string{"telegram.topic_id must be positive"}},
+		{"topic is a list", "crypto:\n  alerts:\n    fear: [25]\ntelegram:\n  bot_token: x\n  group_chat_id: y\n  topic_id: [5]\n", []string{"topic_id must be an integer"}},
+		{"topic not a number", "crypto:\n  alerts:\n    fear: [25]\ntelegram:\n  bot_token: x\n  group_chat_id: y\n  topic_id: general\n", []string{"topic_id"}},
 		{"not yaml", "crypto: [", []string{"parse config"}},
 		{"typo in an index", "crypto:\n  alert:\n    fear: [20]\n", []string{"alert"}},
 	}
@@ -200,6 +279,33 @@ func TestExampleConfigIsValid(t *testing.T) {
 		cfg.Interval.Std() != 4*time.Hour || cfg.Dedup.Cooldown.Std() != 48*time.Hour {
 		t.Errorf("example config: crypto %+v, stocks %+v, interval %s, cooldown %s; want alternative and cnn, 4h and 2d",
 			cfg.Crypto, cfg.Stocks, cfg.Interval, cfg.Dedup.Cooldown)
+	}
+}
+
+// The commented-out group topic variant of the example must work once enabled.
+func TestExampleConfigGroupTopicVariant(t *testing.T) {
+	clearEnv(t)
+	raw, err := os.ReadFile("../../config.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	example := string(raw)
+	for old, enabled := range map[string]string{
+		"\n  chat_id:":     "\n  # chat_id:",
+		"# group_chat_id:": "group_chat_id:",
+		"# topic_id:":      "topic_id:",
+	} {
+		if !strings.Contains(example, old) {
+			t.Fatalf("example config has no %q", old)
+		}
+		example = strings.Replace(example, old, enabled, 1)
+	}
+	cfg, err := Load(writeConfig(t, example))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chat, topic := cfg.Telegram.Destination(); chat != "-1001234567890" || topic != 42 {
+		t.Errorf("destination = %q, topic %d; want the example group topic", chat, topic)
 	}
 }
 

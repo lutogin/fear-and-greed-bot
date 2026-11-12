@@ -117,7 +117,9 @@ type fakeServices struct {
 
 	mu           sync.Mutex
 	messages     []string
-	telegramDown int // the next requests to fail with HTTP 500
+	telegramDown int    // the next requests to fail with HTTP 500
+	chatID       string // the only chat the fake Bot API accepts
+	topicID      int64  // the only forum topic the fake Bot API accepts, 0 for none
 }
 
 // newFakeServices starts fake sources answering with the given replies;
@@ -127,19 +129,21 @@ func newFakeServices(t *testing.T, crypto sourceReply) *fakeServices {
 }
 
 func newFakeMarkets(t *testing.T, crypto, stocks sourceReply) *fakeServices {
-	f := &fakeServices{crypto: newFakeSource(t, crypto), stocks: newFakeSource(t, stocks)}
+	f := &fakeServices{crypto: newFakeSource(t, crypto), stocks: newFakeSource(t, stocks), chatID: "42"}
 	f.telegram = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			ChatID string `json:"chat_id"`
-			Text   string `json:"text"`
+			ChatID          string `json:"chat_id"`
+			MessageThreadID int64  `json:"message_thread_id"`
+			Text            string `json:"text"`
 		}
-		if r.URL.Path != "/bottest:token/sendMessage" || json.NewDecoder(r.Body).Decode(&req) != nil || req.ChatID != "42" {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if r.URL.Path != "/bottest:token/sendMessage" || json.NewDecoder(r.Body).Decode(&req) != nil ||
+			req.ChatID != f.chatID || req.MessageThreadID != f.topicID {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"unexpected request"}`)
 			return
 		}
-		f.mu.Lock()
-		defer f.mu.Unlock()
 		if f.telegramDown > 0 {
 			f.telegramDown--
 			w.WriteHeader(http.StatusInternalServerError)
@@ -195,8 +199,7 @@ const (
 // writeConfig writes a config watching the given index sections.
 func writeConfig(t *testing.T, statePath string, indexes ...string) string {
 	t.Helper()
-	t.Setenv("TELEGRAM_BOT_TOKEN", "")
-	t.Setenv("TELEGRAM_CHAT_ID", "")
+	clearTelegramEnv(t)
 	if len(indexes) == 0 {
 		indexes = []string{cryptoIndex}
 	}
@@ -213,6 +216,13 @@ telegram:
 		t.Fatal(err)
 	}
 	return path
+}
+
+// clearTelegramEnv makes the test independent of the developer's environment.
+func clearTelegramEnv(t *testing.T) {
+	for _, name := range []string{"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TELEGRAM_GROUP_CHAT_ID", "TELEGRAM_TOPIC_ID"} {
+		t.Setenv(name, "")
+	}
 }
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -388,6 +398,28 @@ func TestTestMessageFlag(t *testing.T) {
 	}
 }
 
+func TestMessagesGoToGroupTopic(t *testing.T) {
+	services := newFakeServices(t, indexReply("10", "Extreme Fear"))
+	services.chatID, services.topicID = "-1009876543210", 7
+	path := writeConfig(t, filepath.Join(t.TempDir(), "state.json"))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(string(raw), "chat_id: 42", "group_chat_id: -1009876543210\n  topic_id: 7", 1)
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := services.options(path)
+	opts.once = true
+	if err := run(context.Background(), quietLogger(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if sent := services.sent(); len(sent) != 1 || !strings.Contains(sent[0], "Крипто") {
+		t.Fatalf("sent %q, want one alert in the group topic", sent)
+	}
+}
+
 // The whole bot watching both markets, on real responses of alternative.me and CNN.
 func TestDaemonStartupMessageWithBothIndexes(t *testing.T) {
 	services := newFakeMarkets(t, recordedAlternativeReply(t), recordedCNNReply(t))
@@ -486,8 +518,7 @@ func TestRunStopsOnCancelledContext(t *testing.T) {
 }
 
 func TestRunRejectsInvalidConfig(t *testing.T) {
-	t.Setenv("TELEGRAM_BOT_TOKEN", "")
-	t.Setenv("TELEGRAM_CHAT_ID", "")
+	clearTelegramEnv(t)
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("alerts:\n  fear: [20]\n"), 0o600); err != nil {
 		t.Fatal(err)
