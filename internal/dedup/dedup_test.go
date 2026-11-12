@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"fear-and-greed-bot/internal/alert"
+	"fear-and-greed-bot/internal/fng"
 )
 
 var (
@@ -39,11 +40,11 @@ func TestDeduplicatorAllow(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			d := New(NewMemoryStore(), cooldown)
 			for _, a := range tt.sent {
-				if err := d.Mark(a, t0); err != nil {
+				if err := d.Mark(fng.Crypto, a, t0); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if got, _ := d.Allow(tt.next, t0.Add(tt.after)); got != tt.want {
+			if got, _ := d.Allow(fng.Crypto, tt.next, t0.Add(tt.after)); got != tt.want {
 				t.Errorf("Allow() = %v, want %v", got, tt.want)
 			}
 		})
@@ -54,25 +55,38 @@ func TestDeduplicatorMarkStoresRecord(t *testing.T) {
 	store := NewMemoryStore()
 	d := New(store, time.Hour)
 	moscow := time.FixedZone("MSK", 3*60*60)
-	if err := d.Mark(fear25, t0.In(moscow)); err != nil {
+	if err := d.Mark(fng.Stocks, fear25, t0.In(moscow)); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := store.Get(string(alert.SideFear))
+	got, ok := store.Get("stocks.fear")
 	want := Record{Level: 25, Value: 22, SentAt: t0}
 	if !ok || got != want {
 		t.Fatalf("stored %+v (found %v), want %+v", got, ok, want)
 	}
-	if _, last := d.Allow(fear25, t0); last != want {
+	if _, last := d.Allow(fng.Stocks, fear25, t0); last != want {
 		t.Errorf("Allow returned last record %+v, want %+v", last, want)
 	}
 }
 
 func TestZeroCooldownNeverSuppresses(t *testing.T) {
 	d := New(NewMemoryStore(), 0)
-	if err := d.Mark(fear25, t0); err != nil {
+	if err := d.Mark(fng.Crypto, fear25, t0); err != nil {
 		t.Fatal(err)
 	}
-	if ok, _ := d.Allow(fear25, t0); !ok {
+	if ok, _ := d.Allow(fng.Crypto, fear25, t0); !ok {
 		t.Error("with zero cooldown every notification must be allowed")
+	}
+}
+
+func TestMarketsAreIndependent(t *testing.T) {
+	d := New(NewMemoryStore(), 48*time.Hour)
+	if err := d.Mark(fng.Crypto, fear25, t0); err != nil {
+		t.Fatal(err)
+	}
+	if ok, _ := d.Allow(fng.Stocks, fear25, t0.Add(time.Hour)); !ok {
+		t.Error("a crypto notification must not suppress the stocks one")
+	}
+	if ok, _ := d.Allow(fng.Crypto, fear25, t0.Add(time.Hour)); ok {
+		t.Error("the crypto notification must still be suppressed")
 	}
 }

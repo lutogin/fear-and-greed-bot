@@ -1,7 +1,15 @@
-// Package fng contains the domain types of the Crypto Fear & Greed Index.
+// Package fng contains the domain types of the Fear & Greed indexes.
 package fng
 
 import "time"
+
+// Market is what an index measures the sentiment of.
+type Market string
+
+const (
+	Crypto Market = "crypto" // the crypto market, mostly Bitcoin
+	Stocks Market = "stocks" // the US stock market
+)
 
 // Reading is a single value of the index.
 type Reading struct {
@@ -18,8 +26,8 @@ type Provider struct {
 	URL  string // page with the index
 }
 
-// Zone is the sentiment band of an index value. Both alternative.me and
-// coinglass.com use these names, with different bands.
+// Zone is the sentiment band of an index value. alternative.me, coinglass.com
+// and CNN use these names, with different bands.
 type Zone string
 
 const (

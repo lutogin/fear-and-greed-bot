@@ -14,14 +14,15 @@ import (
 	"fear-and-greed-bot/internal/fng"
 )
 
-// Message is the Telegram notification (HTML) about a reached key level.
-func Message(p fng.Provider, r fng.Reading, a alert.Alert) string {
+// Message is the Telegram notification (HTML) about a key level reached by
+// the index of market m.
+func Message(m fng.Market, p fng.Provider, r fng.Reading, a alert.Alert) string {
 	icon, what := "😱", "страха"
 	if a.Side == alert.SideGreed {
 		icon, what = "🤑", "жадности"
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s <b>Fear &amp; Greed Index: %s</b>%s\n", icon, number(r.Value), zone(r))
+	fmt.Fprintf(&b, "%s <b>%s — Fear &amp; Greed Index: %s</b>%s\n", icon, marketName(m), number(r.Value), zone(r))
 	fmt.Fprintf(&b, "Достигнут ключевой уровень %s: %s %s\n", what, sign(a.Side), number(a.Level))
 	writeReading(&b, p, r)
 	return strings.TrimSuffix(b.String(), "\n")
@@ -29,18 +30,15 @@ func Message(p fng.Provider, r fng.Reading, a alert.Alert) string {
 
 // StartInfo is what the startup message reports.
 type StartInfo struct {
-	Provider  fng.Provider
-	Reading   fng.Reading // the current index value, valid when FetchErr is nil
-	FetchErr  error       // why the current value could not be read
-	Rules     alert.Rules
+	Indexes   []Status
 	Interval  time.Duration
 	Cooldown  time.Duration
 	NextCheck time.Time
 }
 
-// StartMessage announces that the bot is running: the current index value,
-// which also shows that the source is still read correctly, the key levels
-// and the schedule.
+// StartMessage announces that the bot is running: the current value of every
+// index, which also shows that the sources are still read correctly, their key
+// levels and the schedule.
 func StartMessage(s StartInfo) string {
 	pause := "нет"
 	if s.Cooldown > 0 {
@@ -48,32 +46,68 @@ func StartMessage(s StartInfo) string {
 	}
 	var b strings.Builder
 	b.WriteString("🚀 <b>Fear &amp; Greed бот запущен</b>\n\n")
-	if s.FetchErr != nil {
-		from := ""
-		if s.Provider.Name != "" {
-			from = " с " + credit(s.Provider)
-		}
-		fmt.Fprintf(&b, "⚠️ Не удалось получить индекс%s: %s\n\n", from, html.EscapeString(truncate(s.FetchErr.Error(), 300)))
-	} else {
-		fmt.Fprintf(&b, "Индекс сейчас: <b>%s</b>%s\n", number(s.Reading.Value), zone(s.Reading))
-		writeReading(&b, s.Provider, s.Reading)
-		b.WriteString("\n")
+	for _, st := range s.Indexes {
+		writeStatus(&b, st)
+		fmt.Fprintf(&b, "Пороги: страх %s · жадность %s\n\n",
+			levels(alert.SideFear, st.Rules.Fear), levels(alert.SideGreed, st.Rules.Greed))
 	}
-	b.WriteString("Пороги:\n")
-	fmt.Fprintf(&b, "😱 страх: %s\n", levels(alert.SideFear, s.Rules.Fear))
-	fmt.Fprintf(&b, "🤑 жадность: %s\n\n", levels(alert.SideGreed, s.Rules.Greed))
-	fmt.Fprintf(&b, "Проверка индекса: с интервалом %s, следующая %s UTC\n",
-		humanDuration(s.Interval), s.NextCheck.UTC().Format(timeLayout))
+	what := "индекса"
+	if len(s.Indexes) > 1 {
+		what = "индексов"
+	}
+	fmt.Fprintf(&b, "Проверка %s: с интервалом %s, следующая %s UTC\n",
+		what, humanDuration(s.Interval), s.NextCheck.UTC().Format(timeLayout))
 	fmt.Fprintf(&b, "Пауза между повторными уведомлениями: %s", pause)
 	return b.String()
 }
 
-// TestMessage is sent by the -test-message flag to check the setup.
-func TestMessage(p fng.Provider, r fng.Reading) string {
+// TestMessage is sent by the -test-message flag to check the setup: the
+// current value of every index.
+func TestMessage(statuses []Status) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "✅ Бот подключён. <b>Fear &amp; Greed Index: %s</b>%s\n", number(r.Value), zone(r))
-	writeReading(&b, p, r)
+	b.WriteString("✅ Бот подключён\n")
+	for _, st := range statuses {
+		b.WriteString("\n")
+		writeStatus(&b, st)
+	}
 	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// writeStatus writes the market of an index with its current value and the
+// source of the data, or the reason why the value could not be read.
+func writeStatus(b *strings.Builder, s Status) {
+	if s.FetchErr != nil {
+		fmt.Fprintf(b, "%s <b>%s</b>\n", marketIcon(s.Market), marketName(s.Market))
+		from := ""
+		if s.Provider.Name != "" {
+			from = " с " + credit(s.Provider)
+		}
+		fmt.Fprintf(b, "⚠️ Не удалось получить индекс%s: %s\n", from, html.EscapeString(truncate(s.FetchErr.Error(), 300)))
+		return
+	}
+	fmt.Fprintf(b, "%s <b>%s: %s</b>%s\n", marketIcon(s.Market), marketName(s.Market), number(s.Reading.Value), zone(s.Reading))
+	writeReading(b, s.Provider, s.Reading)
+}
+
+// marketName says in messages which market the index is about.
+func marketName(m fng.Market) string {
+	switch m {
+	case fng.Crypto:
+		return "Крипто"
+	case fng.Stocks:
+		return "Акции США"
+	}
+	return html.EscapeString(string(m))
+}
+
+func marketIcon(m fng.Market) string {
+	switch m {
+	case fng.Crypto:
+		return "🪙"
+	case fng.Stocks:
+		return "📈"
+	}
+	return "📊"
 }
 
 const timeLayout = "02.01.2006 15:04"

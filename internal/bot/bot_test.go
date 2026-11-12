@@ -98,12 +98,17 @@ func newEnv(rules alert.Rules, values ...float64) *env {
 		store:    dedup.NewMemoryStore(),
 		clock:    &clock{now: time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)},
 	}
-	e.bot = New(e.source, e.notifier, rules, dedup.New(e.store, 48*time.Hour), Options{
+	e.bot = New(cryptoIndex(e.source, rules), e.notifier, dedup.New(e.store, 48*time.Hour), Options{
 		Interval: 4 * time.Hour,
 		Logger:   quietLogger(),
 		Now:      e.clock.Now,
 	})
 	return e
+}
+
+// cryptoIndex is the single crypto index read from source.
+func cryptoIndex(source Source, rules alert.Rules) []Index {
+	return []Index{{Market: fng.Crypto, Source: source, Rules: rules}}
 }
 
 func quietLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
@@ -145,7 +150,7 @@ func TestCheckNotifiesWhenKeyLevelReached(t *testing.T) {
 					t.Errorf("message %q does not contain %q", msg, want)
 				}
 			}
-			rec, ok := e.store.Get(string(tt.side))
+			rec, ok := e.store.Get(dedup.Key(fng.Crypto, tt.side))
 			if !ok || rec.Level != tt.level || rec.Value != tt.value || !rec.SentAt.Equal(e.clock.now) {
 				t.Errorf("dedup record = %+v (found %v)", rec, ok)
 			}
@@ -207,7 +212,7 @@ func TestCheckRetriesFailedNotification(t *testing.T) {
 	if err := e.bot.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "telegram is down") {
 		t.Fatalf("Check error = %v, want the send error", err)
 	}
-	if _, ok := e.store.Get(string(alert.SideFear)); ok {
+	if _, ok := e.store.Get(dedup.Key(fng.Crypto, alert.SideFear)); ok {
 		t.Fatal("a failed notification must not start the cooldown")
 	}
 
@@ -244,7 +249,7 @@ func (failingStore) Put(string, dedup.Record) error  { return errors.New("disk f
 
 func TestRunChecksPeriodicallyUntilCancelled(t *testing.T) {
 	source := &fakeSource{values: []float64{50}}
-	b := New(source, &fakeNotifier{}, defaultRules, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
+	b := New(cryptoIndex(source, defaultRules), &fakeNotifier{}, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
 		Interval: 10 * time.Millisecond,
 		Logger:   quietLogger(),
 	})
@@ -267,7 +272,7 @@ func TestRunChecksPeriodicallyUntilCancelled(t *testing.T) {
 func TestRunRetriesFailedCheckSooner(t *testing.T) {
 	source := &fakeSource{values: []float64{18}, errs: []error{errors.New("temporary failure")}}
 	notifier := &fakeNotifier{}
-	b := New(source, notifier, defaultRules, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
+	b := New(cryptoIndex(source, defaultRules), notifier, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
 		Interval:   time.Hour, // a regular check would not happen during the test
 		RetryDelay: 10 * time.Millisecond,
 		Logger:     quietLogger(),
@@ -305,11 +310,10 @@ func TestRunAnnouncesStartWithCurrentValue(t *testing.T) {
 	}
 	for _, want := range []string{
 		"бот запущен",
-		"Индекс сейчас: <b>50</b> (Neutral)",
+		"🪙 <b>Крипто: 50</b> (Neutral)",
 		`Данные <a href="https://example.com/fng">Test</a> на 24.09.2026 00:20 UTC`,
-		"страх: ≤ 25",
-		"жадность: ≥ 75",
-		"с интервалом 4 часа, следующая 24.09.2026 12:00 UTC", // the clock is at 08:00
+		"Пороги: страх ≤ 25 · жадность ≥ 75",
+		"Проверка индекса: с интервалом 4 часа, следующая 24.09.2026 12:00 UTC", // the clock is at 08:00
 		"уведомлениями: 2 дня",
 	} {
 		if !strings.Contains(msgs[0], want) {
@@ -321,7 +325,7 @@ func TestRunAnnouncesStartWithCurrentValue(t *testing.T) {
 func TestRunAnnouncesStartBeforeAlert(t *testing.T) {
 	e := newEnv(defaultRules, 18)
 	msgs := e.runUntilMessages(t, 2)
-	if !strings.Contains(msgs[0], "Индекс сейчас: <b>18</b>") || !strings.Contains(msgs[1], "Fear &amp; Greed Index: 18") {
+	if !strings.Contains(msgs[0], "Крипто: 18</b>") || !strings.Contains(msgs[1], "Крипто — Fear &amp; Greed Index: 18") {
 		t.Fatalf("want the startup message and then the alert, got %q", msgs)
 	}
 	if got := e.source.callCount(); got != 1 {
@@ -334,7 +338,7 @@ func TestRunAnnouncesFetchError(t *testing.T) {
 	e.source.errs = []error{errors.New("unexpected HTTP status 503 Service Unavailable")}
 	msgs := e.runUntilMessages(t, 1)
 	for _, want := range []string{
-		`Не удалось получить индекс с <a href="https://example.com/fng">Test</a>: unexpected HTTP status 503`,
+		"🪙 <b>Крипто</b>\n⚠️ " + `Не удалось получить индекс с <a href="https://example.com/fng">Test</a>: unexpected HTTP status 503`,
 		"следующая 24.09.2026 08:05 UTC", // retried after the default 5 minutes
 	} {
 		if !strings.Contains(msgs[0], want) {
@@ -346,7 +350,7 @@ func TestRunAnnouncesFetchError(t *testing.T) {
 func TestRunKeepsCheckingWhenStartupMessageFails(t *testing.T) {
 	source := &fakeSource{values: []float64{50}}
 	notifier := &fakeNotifier{err: errors.New("telegram is down")}
-	b := New(source, notifier, defaultRules, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
+	b := New(cryptoIndex(source, defaultRules), notifier, dedup.New(dedup.NewMemoryStore(), time.Hour), Options{
 		Interval: 10 * time.Millisecond,
 		Logger:   quietLogger(),
 	})
@@ -357,13 +361,131 @@ func TestRunKeepsCheckingWhenStartupMessageFails(t *testing.T) {
 }
 
 func TestNewAppliesDefaults(t *testing.T) {
-	b := New(&fakeSource{}, &fakeNotifier{}, defaultRules, nil, Options{})
+	b := New(cryptoIndex(&fakeSource{}, defaultRules), &fakeNotifier{}, nil, Options{})
 	if b.interval != DefaultInterval || b.retryDelay != DefaultRetryDelay || b.log == nil || b.now == nil {
 		t.Errorf("defaults not applied: interval %s, retry %s", b.interval, b.retryDelay)
 	}
-	b = New(&fakeSource{}, &fakeNotifier{}, defaultRules, nil, Options{Interval: time.Minute})
+	b = New(cryptoIndex(&fakeSource{}, defaultRules), &fakeNotifier{}, nil, Options{Interval: time.Minute})
 	if b.retryDelay != time.Minute {
 		t.Errorf("retry delay %s must be capped by the interval", b.retryDelay)
+	}
+}
+
+// twoIndexes is a bot watching a crypto and a stocks index with the same levels.
+type twoIndexes struct {
+	crypto, stocks *fakeSource
+	notifier       *fakeNotifier
+	store          *dedup.MemoryStore
+	bot            *Bot
+}
+
+func newTwoIndexes(crypto, stocks *fakeSource, opts Options) *twoIndexes {
+	e := &twoIndexes{crypto: crypto, stocks: stocks, notifier: &fakeNotifier{}, store: dedup.NewMemoryStore()}
+	opts.Logger = quietLogger()
+	if opts.Now == nil {
+		opts.Now = func() time.Time { return time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC) }
+	}
+	e.bot = New([]Index{
+		{Market: fng.Crypto, Source: crypto, Rules: defaultRules},
+		{Market: fng.Stocks, Source: stocks, Rules: alert.Rules{Fear: []float64{20}, Greed: []float64{80}}},
+	}, e.notifier, dedup.New(e.store, 48*time.Hour), opts)
+	return e
+}
+
+func TestCheckNotifiesEachIndexSeparately(t *testing.T) {
+	e := newTwoIndexes(&fakeSource{values: []float64{18}}, &fakeSource{values: []float64{15}}, Options{})
+	if err := e.bot.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	msgs := e.notifier.messages()
+	if len(msgs) != 2 || !strings.Contains(msgs[0], "Крипто — Fear &amp; Greed Index: 18") || !strings.Contains(msgs[0], "≤ 25") ||
+		!strings.Contains(msgs[1], "Акции США — Fear &amp; Greed Index: 15") || !strings.Contains(msgs[1], "≤ 20") {
+		t.Fatalf("want a crypto and a stocks alert with their own levels, got %q", msgs)
+	}
+	for _, key := range []string{"crypto.fear", "stocks.fear"} {
+		if _, ok := e.store.Get(key); !ok {
+			t.Errorf("no dedup record %q", key)
+		}
+	}
+
+	// Both are within their cooldowns now.
+	if err := e.bot.Check(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(e.notifier.messages()); got != 2 {
+		t.Errorf("sent %d notifications, want still 2", got)
+	}
+}
+
+func TestCheckContinuesAfterFailedIndex(t *testing.T) {
+	crypto := &fakeSource{values: []float64{50}, errs: []error{errors.New("alternative.me is down")}}
+	e := newTwoIndexes(crypto, &fakeSource{values: []float64{85}}, Options{})
+	err := e.bot.Check(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "crypto index: fetch index: alternative.me is down") {
+		t.Fatalf("Check error = %v, want the crypto fetch error", err)
+	}
+	if msgs := e.notifier.messages(); len(msgs) != 1 || !strings.Contains(msgs[0], "Акции США — Fear &amp; Greed Index: 85") {
+		t.Errorf("the stocks alert must still be sent, got %q", msgs)
+	}
+}
+
+func TestRunAnnouncesBothIndexes(t *testing.T) {
+	stocks := &fakeSource{values: []float64{50}, errs: []error{errors.New("unexpected HTTP status 418")}}
+	e := newTwoIndexes(&fakeSource{values: []float64{60}}, stocks, Options{Interval: time.Hour})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go e.bot.Run(ctx)
+
+	waitFor(t, func() bool { return len(e.notifier.messages()) == 1 })
+	msg := e.notifier.messages()[0]
+	for _, want := range []string{
+		"🪙 <b>Крипто: 60</b> (Neutral)",
+		"Пороги: страх ≤ 25 · жадность ≥ 75",
+		"📈 <b>Акции США</b>\n⚠️ Не удалось получить индекс с ",
+		"Пороги: страх ≤ 20 · жадность ≥ 80",
+		"Проверка индексов: с интервалом 1 час, следующая 24.09.2026 08:05 UTC", // the stocks index is retried soon
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("startup message %q does not contain %q", msg, want)
+		}
+	}
+	if strings.Index(msg, "Крипто") > strings.Index(msg, "Акции США") {
+		t.Errorf("crypto must come first: %q", msg)
+	}
+}
+
+func TestRunRetriesOnlyTheFailedIndex(t *testing.T) {
+	crypto := &fakeSource{values: []float64{50}}
+	stocks := &fakeSource{values: []float64{50}, errs: []error{errors.New("down"), errors.New("down"), errors.New("down")}}
+	e := newTwoIndexes(crypto, stocks, Options{Interval: time.Hour, RetryDelay: time.Millisecond, Now: time.Now})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		e.bot.Run(ctx)
+		close(done)
+	}()
+
+	waitFor(t, func() bool { return stocks.callCount() >= 4 }) // the startup check and three retries
+	cancel()
+	<-done
+	if got := crypto.callCount(); got != 1 {
+		t.Errorf("crypto source called %d times, want 1: its next check is an hour later", got)
+	}
+}
+
+func TestFetch(t *testing.T) {
+	statuses := Fetch(context.Background(), []Index{
+		{Market: fng.Crypto, Source: &fakeSource{values: []float64{30}}, Rules: defaultRules},
+		{Market: fng.Stocks, Source: &fakeSource{errs: []error{errors.New("down")}}},
+	})
+	if len(statuses) != 2 {
+		t.Fatalf("got %d statuses", len(statuses))
+	}
+	if s := statuses[0]; s.Market != fng.Crypto || s.FetchErr != nil || s.Reading.Value != 30 || s.Provider != testProvider || len(s.Rules.Fear) != 1 {
+		t.Errorf("crypto status = %+v", s)
+	}
+	if s := statuses[1]; s.Market != fng.Stocks || s.FetchErr == nil {
+		t.Errorf("stocks status = %+v, want the fetch error", s)
 	}
 }
 

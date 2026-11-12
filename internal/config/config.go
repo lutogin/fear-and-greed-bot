@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +18,11 @@ import (
 )
 
 const (
+	// Sources of the crypto index.
 	SourceAlternative = "alternative"
 	SourceCoinGlass   = "coinglass"
+	// Source of the stock market index.
+	SourceCNN = "cnn"
 
 	StorageFile   = "file"
 	StorageMemory = "memory"
@@ -31,14 +35,31 @@ const (
 )
 
 type Config struct {
-	// Source of the index: "alternative" (the alternative.me API) or
-	// "coinglass" (the data of the coinglass.com page).
-	Source string `yaml:"source"`
 	// Interval between index checks.
-	Interval Duration       `yaml:"interval"`
-	Alerts   AlertsConfig   `yaml:"alerts"`
+	Interval Duration `yaml:"interval"`
+	// The watched indexes; a missing section turns its index off.
+	Crypto   *IndexConfig   `yaml:"crypto"`
+	Stocks   *IndexConfig   `yaml:"stocks"`
 	Dedup    DedupConfig    `yaml:"dedup"`
 	Telegram TelegramConfig `yaml:"telegram"`
+
+	// The top-level keys of the single-index config, which moved to the crypto
+	// section. They are read only to explain the move.
+	LegacySource string        `yaml:"source"`
+	LegacyAlerts *AlertsConfig `yaml:"alerts"`
+}
+
+// IndexConfig describes one watched index.
+type IndexConfig struct {
+	// Source of the index. Crypto: "alternative" (the alternative.me API) or
+	// "coinglass" (the data of the coinglass.com page). Stocks: "cnn".
+	Source string       `yaml:"source"`
+	Alerts AlertsConfig `yaml:"alerts"`
+}
+
+// Rules returns the key levels of the index.
+func (c IndexConfig) Rules() alert.Rules {
+	return alert.Rules{Fear: c.Alerts.Fear, Greed: c.Alerts.Greed}
 }
 
 // AlertsConfig holds the key levels: a fear level fires when the index is at or
@@ -63,9 +84,10 @@ type TelegramConfig struct {
 }
 
 // Default returns the configuration used for options missing from the file.
+// The index sources get their defaults in Load, once it is known which
+// sections the file has.
 func Default() Config {
 	return Config{
-		Source:   SourceAlternative,
 		Interval: Duration(4 * time.Hour),
 		Dedup: DedupConfig{
 			Cooldown: Duration(48 * time.Hour),
@@ -88,6 +110,12 @@ func Load(path string) (Config, error) {
 	if err := dec.Decode(&cfg); err != nil && !errors.Is(err, io.EOF) {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	if cfg.Crypto != nil && cfg.Crypto.Source == "" {
+		cfg.Crypto.Source = SourceAlternative
+	}
+	if cfg.Stocks != nil && cfg.Stocks.Source == "" {
+		cfg.Stocks.Source = SourceCNN
+	}
 	if v := os.Getenv(EnvBotToken); v != "" {
 		cfg.Telegram.BotToken = v
 	}
@@ -103,14 +131,20 @@ func Load(path string) (Config, error) {
 // Validate reports all problems of the configuration at once.
 func (c Config) Validate() error {
 	var errs []error
-	if c.Source != SourceAlternative && c.Source != SourceCoinGlass {
-		errs = append(errs, fmt.Errorf("source must be %q or %q, got %q", SourceAlternative, SourceCoinGlass, c.Source))
+	if c.LegacySource != "" || c.LegacyAlerts != nil {
+		errs = append(errs, errors.New("source and alerts moved to the crypto section: crypto.source, crypto.alerts (see config.example.yaml)"))
+	}
+	if c.Crypto == nil && c.Stocks == nil {
+		errs = append(errs, errors.New("at least one index is required: the crypto or the stocks section"))
+	}
+	if c.Crypto != nil {
+		errs = append(errs, validateIndex("crypto", *c.Crypto, SourceAlternative, SourceCoinGlass))
+	}
+	if c.Stocks != nil {
+		errs = append(errs, validateIndex("stocks", *c.Stocks, SourceCNN))
 	}
 	if c.Interval.Std() < MinInterval {
 		errs = append(errs, fmt.Errorf("interval must be at least %s", MinInterval))
-	}
-	if err := c.Rules().Validate(); err != nil {
-		errs = append(errs, fmt.Errorf("alerts: %w", err))
 	}
 	if c.Dedup.Cooldown < 0 {
 		errs = append(errs, errors.New("dedup.cooldown must not be negative"))
@@ -133,9 +167,20 @@ func (c Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Rules returns the configured key levels.
-func (c Config) Rules() alert.Rules {
-	return alert.Rules{Fear: c.Alerts.Fear, Greed: c.Alerts.Greed}
+// validateIndex checks the section name of an index, which may use one of sources.
+func validateIndex(name string, c IndexConfig, sources ...string) error {
+	var errs []error
+	if !slices.Contains(sources, c.Source) {
+		quoted := make([]string, len(sources))
+		for i, s := range sources {
+			quoted[i] = strconv.Quote(s)
+		}
+		errs = append(errs, fmt.Errorf("%s.source must be %s, got %q", name, strings.Join(quoted, " or "), c.Source))
+	}
+	if err := c.Rules().Validate(); err != nil {
+		errs = append(errs, fmt.Errorf("%s.alerts: %w", name, err))
+	}
+	return errors.Join(errs...)
 }
 
 // Duration is a time.Duration that also accepts days in YAML, e.g. "2d" or "1d12h".

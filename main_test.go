@@ -59,25 +59,75 @@ func recordedCoinGlassReply(t *testing.T) sourceReply {
 	}
 }
 
-// fakeServices stands in for the index source and the Telegram Bot API.
+// cnnReply serves score the way the CNN graphdata endpoint does.
+func cnnReply(score, rating string) sourceReply {
+	return func(w http.ResponseWriter) {
+		_, _ = io.WriteString(w, `{"fear_and_greed":{"score":`+score+`,"rating":"`+rating+
+			`","timestamp":"2026-11-12T21:43:31+00:00","previous_close":36.97},"fear_and_greed_historical":{"data":[]}}`)
+	}
+}
+
+// recordedCNNReply replays a real response of production.dataviz.cnn.io
+// recorded on 2026-11-12, with the score 39.94 (fear).
+func recordedCNNReply(t *testing.T) sourceReply {
+	t.Helper()
+	body, err := os.ReadFile("testdata/cnn_graphdata_2026-11-12.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return func(w http.ResponseWriter) { _, _ = w.Write(body) }
+}
+
+// teapotReply is how the CNN endpoint turns away clients it takes for bots.
+func teapotReply(w http.ResponseWriter) {
+	w.WriteHeader(http.StatusTeapot)
+	_, _ = io.WriteString(w, "I'm a teapot")
+}
+
+// fakeSource stands in for the API of an index source.
+type fakeSource struct {
+	*httptest.Server
+	mu    sync.Mutex
+	calls []string // request URIs
+}
+
+func newFakeSource(t *testing.T, reply sourceReply) *fakeSource {
+	s := &fakeSource{}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.calls = append(s.calls, r.URL.RequestURI())
+		s.mu.Unlock()
+		reply(w)
+	}))
+	t.Cleanup(s.Close)
+	return s
+}
+
+func (s *fakeSource) requests() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.calls...)
+}
+
+// fakeServices stands in for the index sources and the Telegram Bot API.
 type fakeServices struct {
-	source   *httptest.Server
+	crypto   *fakeSource
+	stocks   *fakeSource
 	telegram *httptest.Server
 
 	mu           sync.Mutex
-	sourceCalls  []string // request URIs
 	messages     []string
 	telegramDown int // the next requests to fail with HTTP 500
 }
 
-func newFakeServices(t *testing.T, reply sourceReply) *fakeServices {
-	f := &fakeServices{}
-	f.source = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.mu.Lock()
-		f.sourceCalls = append(f.sourceCalls, r.URL.RequestURI())
-		f.mu.Unlock()
-		reply(w)
-	}))
+// newFakeServices starts fake sources answering with the given replies;
+// the stocks one answers with a neutral value.
+func newFakeServices(t *testing.T, crypto sourceReply) *fakeServices {
+	return newFakeMarkets(t, crypto, cnnReply("50", "neutral"))
+}
+
+func newFakeMarkets(t *testing.T, crypto, stocks sourceReply) *fakeServices {
+	f := &fakeServices{crypto: newFakeSource(t, crypto), stocks: newFakeSource(t, stocks)}
 	f.telegram = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ChatID string `json:"chat_id"`
@@ -99,15 +149,8 @@ func newFakeServices(t *testing.T, reply sourceReply) *fakeServices {
 		f.messages = append(f.messages, req.Text)
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
-	t.Cleanup(f.source.Close)
 	t.Cleanup(f.telegram.Close)
 	return f
-}
-
-func (f *fakeServices) sourceRequests() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.sourceCalls...)
 }
 
 func (f *fakeServices) sent() []string {
@@ -139,26 +182,33 @@ func (f *fakeServices) waitForMessages(t *testing.T, n int) []string {
 }
 
 func (f *fakeServices) options(configPath string) options {
-	return options{configPath: configPath, sourceURL: f.source.URL, telegramURL: f.telegram.URL}
+	return options{configPath: configPath, cryptoURL: f.crypto.URL, stocksURL: f.stocks.URL, telegramURL: f.telegram.URL}
 }
 
-// writeConfig writes a config with fear 20 / greed 80 and the given extra YAML lines.
-func writeConfig(t *testing.T, statePath string, extra ...string) string {
+// Index sections of the test configs.
+const (
+	cryptoIndex = "crypto:\n  alerts:\n    fear: [20]\n    greed: [80]\n"
+	stocksIndex = "stocks:\n  alerts:\n    fear: [25]\n    greed: [75]\n"
+	coinGlass   = "crypto:\n  source: coinglass\n  alerts:\n    fear: [20]\n    greed: [80]\n"
+)
+
+// writeConfig writes a config watching the given index sections.
+func writeConfig(t *testing.T, statePath string, indexes ...string) string {
 	t.Helper()
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	t.Setenv("TELEGRAM_CHAT_ID", "")
+	if len(indexes) == 0 {
+		indexes = []string{cryptoIndex}
+	}
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	cfg := `
-alerts:
-  fear: [20]
-  greed: [80]
+	cfg := strings.Join(indexes, "") + `
 dedup:
   cooldown: 2d
   file: ` + statePath + `
 telegram:
   bot_token: "test:token"
   chat_id: 42
-` + strings.Join(extra, "\n") + "\n"
+`
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -194,10 +244,9 @@ func TestDaemonStartupMessageFromRealAlternativeResponse(t *testing.T) {
 	t.Logf("startup message:\n%s", msg)
 	for _, want := range []string{
 		"🚀 <b>Fear &amp; Greed бот запущен</b>",
-		"Индекс сейчас: <b>71</b> (Greed)",
+		"🪙 <b>Крипто: 71</b> (Greed)",
 		`Данные <a href="https://alternative.me/crypto/fear-and-greed-index/">alternative.me</a> на 25.09.2026 00:00 UTC`,
-		"😱 страх: ≤ 20",
-		"🤑 жадность: ≥ 80",
+		"Пороги: страх ≤ 20 · жадность ≥ 80",
 		"Проверка индекса: с интервалом 4 часа, следующая ",
 		"Пауза между повторными уведомлениями: 2 дня",
 	} {
@@ -205,7 +254,10 @@ func TestDaemonStartupMessageFromRealAlternativeResponse(t *testing.T) {
 			t.Errorf("startup message does not contain %q", want)
 		}
 	}
-	if got := services.sourceRequests(); len(got) != 1 || got[0] != "/fng/?limit=1" {
+	if strings.Contains(msg, "Акции") {
+		t.Error("the stocks index is not configured and must not be reported")
+	}
+	if got := services.crypto.requests(); len(got) != 1 || got[0] != "/fng/?limit=1" {
 		t.Errorf("source requests = %q, want one GET /fng/?limit=1", got)
 	}
 }
@@ -214,21 +266,21 @@ func TestDaemonStartupMessageFromRealAlternativeResponse(t *testing.T) {
 // startup message must show the value the page showed.
 func TestDaemonStartupMessageFromRealCoinGlassResponse(t *testing.T) {
 	services := newFakeServices(t, recordedCoinGlassReply(t))
-	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), "source: coinglass")))
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), coinGlass)))
 
 	msg := services.waitForMessages(t, 1)[0]
 	t.Logf("startup message:\n%s", msg)
 	for _, want := range []string{
-		"Индекс сейчас: <b>72</b> (Greed)",
+		"🪙 <b>Крипто: 72</b> (Greed)",
 		"BTC: $84,401",
 		`Данные <a href="https://www.coinglass.com/pro/i/FearGreedIndex">CoinGlass</a> на 24.09.2026 00:20 UTC`,
-		"😱 страх: ≤ 20",
+		"Пороги: страх ≤ 20",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("startup message does not contain %q", want)
 		}
 	}
-	if got := services.sourceRequests(); len(got) != 1 || !strings.HasPrefix(got[0], "/api/index/history") {
+	if got := services.crypto.requests(); len(got) != 1 || !strings.HasPrefix(got[0], "/api/index/history") {
 		t.Errorf("source requests = %q, want one to /api/index/history", got)
 	}
 }
@@ -238,14 +290,14 @@ func TestDaemonAnnouncesStartBeforeAlert(t *testing.T) {
 	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
 
 	sent := services.waitForMessages(t, 2)
-	if !strings.Contains(sent[0], "Индекс сейчас: <b>15</b> (Extreme Fear)") {
+	if !strings.Contains(sent[0], "Крипто: 15</b> (Extreme Fear)") {
 		t.Errorf("first message must be the startup one with the current value, got %q", sent[0])
 	}
-	if !strings.Contains(sent[1], "Fear &amp; Greed Index: 15") || !strings.Contains(sent[1], "≤ 20") ||
+	if !strings.Contains(sent[1], "Крипто — Fear &amp; Greed Index: 15") || !strings.Contains(sent[1], "≤ 20") ||
 		!strings.Contains(sent[1], ">alternative.me</a>") {
 		t.Errorf("the alert must follow the startup message, got %q", sent[1])
 	}
-	if got := services.sourceRequests(); len(got) != 1 {
+	if got := services.crypto.requests(); len(got) != 1 {
 		t.Errorf("source requested %d times, want 1 for both messages", len(got))
 	}
 }
@@ -260,10 +312,10 @@ func changedEncryptionReply(w http.ResponseWriter) {
 
 func TestDaemonReportsUnreadableIndexAtStartup(t *testing.T) {
 	services := newFakeServices(t, changedEncryptionReply)
-	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), "source: coinglass")))
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), coinGlass)))
 
 	msg := services.waitForMessages(t, 1)[0]
-	for _, want := range []string{"⚠️ Не удалось получить индекс с ", ">CoinGlass</a>: unsupported encryption version", "страх: ≤ 20"} {
+	for _, want := range []string{"⚠️ Не удалось получить индекс с ", ">CoinGlass</a>: unsupported encryption version", "страх ≤ 20"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("startup message %q does not contain %q", msg, want)
 		}
@@ -276,7 +328,7 @@ func TestDaemonRunsWhenStartupMessageFails(t *testing.T) {
 	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"))))
 
 	sent := services.waitForMessages(t, 1)
-	if !strings.Contains(sent[0], "Fear &amp; Greed Index: 15") {
+	if !strings.Contains(sent[0], "Крипто — Fear &amp; Greed Index: 15") {
 		t.Errorf("the first check must still send the alert, got %q", sent[0])
 	}
 }
@@ -298,11 +350,11 @@ func TestOnceRunsShareCooldownThroughStateFile(t *testing.T) {
 	if len(sent) != 1 {
 		t.Fatalf("sent %d notifications, want 1: %q", len(sent), sent)
 	}
-	if !strings.Contains(sent[0], "Fear &amp; Greed Index: 15") || !strings.Contains(sent[0], "≤ 20") {
+	if !strings.Contains(sent[0], "Крипто — Fear &amp; Greed Index: 15") || !strings.Contains(sent[0], "≤ 20") {
 		t.Errorf("unexpected notification %q", sent[0])
 	}
 	state, err := os.ReadFile(statePath)
-	if err != nil || !strings.Contains(string(state), `"fear"`) {
+	if err != nil || !strings.Contains(string(state), `"crypto.fear"`) {
 		t.Errorf("state file = %s, %v; want a fear record", state, err)
 	}
 }
@@ -331,8 +383,96 @@ func TestTestMessageFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 	sent := services.sent()
-	if len(sent) != 1 || !strings.Contains(sent[0], "✅") || !strings.Contains(sent[0], "(Neutral)") {
+	if len(sent) != 1 || !strings.Contains(sent[0], "✅") || !strings.Contains(sent[0], "Крипто: 50</b> (Neutral)") {
 		t.Fatalf("sent %q, want one test message", sent)
+	}
+}
+
+// The whole bot watching both markets, on real responses of alternative.me and CNN.
+func TestDaemonStartupMessageWithBothIndexes(t *testing.T) {
+	services := newFakeMarkets(t, recordedAlternativeReply(t), recordedCNNReply(t))
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), cryptoIndex, stocksIndex)))
+
+	msg := services.waitForMessages(t, 1)[0]
+	t.Logf("startup message:\n%s", msg)
+	for _, want := range []string{
+		"🪙 <b>Крипто: 71</b> (Greed)\n" +
+			`Данные <a href="https://alternative.me/crypto/fear-and-greed-index/">alternative.me</a> на 25.09.2026 00:00 UTC` + "\n" +
+			"Пороги: страх ≤ 20 · жадность ≥ 80",
+		"📈 <b>Акции США: 40</b> (Fear)\n" +
+			`Данные <a href="https://edition.cnn.com/markets/fear-and-greed">CNN</a> на 12.11.2026 21:43 UTC` + "\n" +
+			"Пороги: страх ≤ 25 · жадность ≥ 75",
+		"Проверка индексов: с интервалом 4 часа",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("startup message does not contain %q", want)
+		}
+	}
+	if got := services.stocks.requests(); len(got) != 1 || got[0] != "/index/fearandgreed/graphdata" {
+		t.Errorf("stocks source requests = %q, want one GET /index/fearandgreed/graphdata", got)
+	}
+}
+
+func TestDaemonAlertsAboutStocks(t *testing.T) {
+	services := newFakeMarkets(t, indexReply("50", "Neutral"), cnnReply("17.6", "extreme fear"))
+	startDaemon(t, services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), cryptoIndex, stocksIndex)))
+
+	sent := services.waitForMessages(t, 2)
+	want := "😱 <b>Акции США — Fear &amp; Greed Index: 18</b> (Extreme Fear)\n" +
+		"Достигнут ключевой уровень страха: ≤ 25\n" +
+		`Данные <a href="https://edition.cnn.com/markets/fear-and-greed">CNN</a> на 12.11.2026 21:43 UTC`
+	if sent[1] != want {
+		t.Errorf("alert:\n%s\nwant:\n%s", sent[1], want)
+	}
+}
+
+func TestOnceAlertsAboutBothIndexes(t *testing.T) {
+	services := newFakeMarkets(t, indexReply("15", "Extreme Fear"), cnnReply("80", "extreme greed"))
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	opts := services.options(writeConfig(t, statePath, cryptoIndex, stocksIndex))
+	opts.once = true
+
+	for range 2 {
+		if err := run(context.Background(), quietLogger(), opts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sent := services.sent()
+	if len(sent) != 2 || !strings.Contains(sent[0], "Крипто — Fear &amp; Greed Index: 15") ||
+		!strings.Contains(sent[1], "Акции США — Fear &amp; Greed Index: 80") || !strings.Contains(sent[1], "≥ 75") {
+		t.Fatalf("sent %q, want one crypto and one stocks alert", sent)
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil || !strings.Contains(string(state), `"crypto.fear"`) || !strings.Contains(string(state), `"stocks.greed"`) {
+		t.Errorf("state file = %s, %v; want records of both indexes", state, err)
+	}
+}
+
+func TestOnceReportsFailedIndexAndAlertsAboutTheOther(t *testing.T) {
+	services := newFakeMarkets(t, indexReply("15", "Extreme Fear"), teapotReply)
+	opts := services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), cryptoIndex, stocksIndex))
+	opts.once = true
+	err := run(context.Background(), quietLogger(), opts)
+	if err == nil || !strings.Contains(err.Error(), "stocks index: fetch index: unexpected HTTP status 418") {
+		t.Fatalf("err = %v, want the stocks fetch error", err)
+	}
+	if sent := services.sent(); len(sent) != 1 || !strings.Contains(sent[0], "Крипто — Fear &amp; Greed Index: 15") {
+		t.Errorf("sent %q, want the crypto alert", sent)
+	}
+}
+
+func TestTestMessageFlagWithBothIndexes(t *testing.T) {
+	services := newFakeMarkets(t, indexReply("50", "Neutral"), teapotReply)
+	opts := services.options(writeConfig(t, filepath.Join(t.TempDir(), "state.json"), cryptoIndex, stocksIndex))
+	opts.testMessage = true
+	err := run(context.Background(), quietLogger(), opts)
+	if err == nil || !strings.Contains(err.Error(), "fetch stocks index: unexpected HTTP status 418") {
+		t.Errorf("err = %v, want the stocks fetch error", err)
+	}
+	sent := services.sent()
+	if len(sent) != 1 || !strings.Contains(sent[0], "Крипто: 50</b> (Neutral)") ||
+		!strings.Contains(sent[0], "📈 <b>Акции США</b>\n⚠️ Не удалось получить индекс с ") {
+		t.Fatalf("sent %q, want one test message showing both indexes", sent)
 	}
 }
 

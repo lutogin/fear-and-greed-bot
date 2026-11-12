@@ -1,9 +1,11 @@
 // Command fngbot watches the Crypto Fear & Greed Index (alternative.me or
-// CoinGlass) and notifies a Telegram chat when the index reaches configured key levels.
+// CoinGlass) and the CNN Fear & Greed Index of the US stock market, and
+// notifies a Telegram chat when an index reaches its configured key levels.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,16 +17,18 @@ import (
 
 	"fear-and-greed-bot/internal/alternative"
 	"fear-and-greed-bot/internal/bot"
+	"fear-and-greed-bot/internal/cnn"
 	"fear-and-greed-bot/internal/coinglass"
 	"fear-and-greed-bot/internal/config"
 	"fear-and-greed-bot/internal/dedup"
+	"fear-and-greed-bot/internal/fng"
 	"fear-and-greed-bot/internal/telegram"
 )
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to the YAML config")
 	once := flag.Bool("once", false, "check the index once and exit")
-	testMessage := flag.Bool("test-message", false, "send the current index value to Telegram to check the setup, then exit")
+	testMessage := flag.Bool("test-message", false, "send the current index values to Telegram to check the setup, then exit")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -44,7 +48,8 @@ type options struct {
 	testMessage bool
 
 	// Service URLs, empty for the real ones; tests point them to fakes.
-	sourceURL   string
+	cryptoURL   string // the API host of the crypto index source
+	stocksURL   string // the API host of the stock index source
 	telegramURL string
 }
 
@@ -54,29 +59,21 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		return err
 	}
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	source := newSource(cfg.Source, httpClient, opts.sourceURL)
+	indexes := newIndexes(cfg, httpClient, opts)
 	notifier := telegram.New(cfg.Telegram.BotToken, cfg.Telegram.ChatID, httpClient)
 	if opts.telegramURL != "" {
 		notifier.BaseURL = opts.telegramURL
 	}
 
 	if opts.testMessage {
-		r, err := source.Fetch(ctx)
-		if err != nil {
-			return fmt.Errorf("fetch index: %w", err)
-		}
-		if err := notifier.Send(ctx, bot.TestMessage(source.Provider(), r)); err != nil {
-			return err
-		}
-		log.Info("test message sent", "value", r.Value)
-		return nil
+		return sendTestMessage(ctx, log, indexes, notifier)
 	}
 
 	store, err := openStore(cfg.Dedup)
 	if err != nil {
 		return err
 	}
-	b := bot.New(source, notifier, cfg.Rules(), dedup.New(store, cfg.Dedup.Cooldown.Std()), bot.Options{
+	b := bot.New(indexes, notifier, dedup.New(store, cfg.Dedup.Cooldown.Std()), bot.Options{
 		Interval: cfg.Interval.Std(),
 		Logger:   log,
 	})
@@ -84,16 +81,54 @@ func run(ctx context.Context, log *slog.Logger, opts options) error {
 		return b.Check(ctx)
 	}
 
-	log.Info("bot started",
-		"interval", cfg.Interval, "fear_levels", cfg.Alerts.Fear, "greed_levels", cfg.Alerts.Greed,
-		"cooldown", cfg.Dedup.Cooldown, "storage", cfg.Dedup.Storage)
-	b.Run(ctx) // announces the start in Telegram with the current index value
+	attrs := []any{"interval", cfg.Interval, "cooldown", cfg.Dedup.Cooldown, "storage", cfg.Dedup.Storage}
+	for _, idx := range indexes {
+		attrs = append(attrs, slog.Group(string(idx.Market),
+			"source", idx.Source.Provider().Name, "fear_levels", idx.Rules.Fear, "greed_levels", idx.Rules.Greed))
+	}
+	log.Info("bot started", attrs...)
+	b.Run(ctx) // announces the start in Telegram with the current index values
 	log.Info("bot stopped")
 	return nil
 }
 
-// newSource returns the configured index source; baseURL, if set, replaces its API host.
-func newSource(name string, httpClient *http.Client, baseURL string) bot.Source {
+// sendTestMessage sends the current value of every index. The message also
+// goes out when some index could not be read, to show which one fails.
+func sendTestMessage(ctx context.Context, log *slog.Logger, indexes []bot.Index, notifier *telegram.Client) error {
+	statuses := bot.Fetch(ctx, indexes)
+	if err := notifier.Send(ctx, bot.TestMessage(statuses)); err != nil {
+		return err
+	}
+	var errs []error
+	for _, s := range statuses {
+		if s.FetchErr != nil {
+			errs = append(errs, fmt.Errorf("fetch %s index: %w", s.Market, s.FetchErr))
+			continue
+		}
+		log.Info("test message sent", "index", s.Market, "value", s.Reading.Value)
+	}
+	return errors.Join(errs...)
+}
+
+// newIndexes returns the configured indexes: crypto first, then stocks.
+func newIndexes(cfg config.Config, httpClient *http.Client, opts options) []bot.Index {
+	var indexes []bot.Index
+	if c := cfg.Crypto; c != nil {
+		indexes = append(indexes, bot.Index{Market: fng.Crypto, Source: newCryptoSource(c.Source, httpClient, opts.cryptoURL), Rules: c.Rules()})
+	}
+	if c := cfg.Stocks; c != nil {
+		src := cnn.NewClient(httpClient) // the only stock index source
+		if opts.stocksURL != "" {
+			src.BaseURL = opts.stocksURL
+		}
+		indexes = append(indexes, bot.Index{Market: fng.Stocks, Source: src, Rules: c.Rules()})
+	}
+	return indexes
+}
+
+// newCryptoSource returns the configured crypto index source; baseURL, if set,
+// replaces its API host.
+func newCryptoSource(name string, httpClient *http.Client, baseURL string) bot.Source {
 	if name == config.SourceCoinGlass {
 		c := coinglass.NewClient(httpClient)
 		if baseURL != "" {
